@@ -3,3 +3,5 @@ undetected-chromedriver
 setuptools
 google-api-python-client
 google-auth
+anthropic
+python-dotenv

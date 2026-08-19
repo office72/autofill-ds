@@ -1,0 +1,17 @@
+# AI document-intake pipeline (extract_client_intake.py) as an HTTP
+# service (intake_service.py), for a Zoho CRM button - separate image from
+# document-analyzer's trigger-service.
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY requirements-intake.txt .
+RUN pip install --no-cache-dir -r requirements-intake.txt
+
+COPY extract_client_intake.py intake_service.py ./
+
+ENV PYTHONUNBUFFERED=1
+
+# Long timeout: scanning a folder can run several sequential Opus vision
+# calls (one per passport/birth-certificate/citizenship document found).
+CMD exec gunicorn --bind 0.0.0.0:${PORT:-8080} --workers 1 --threads 4 --timeout 600 intake_service:app

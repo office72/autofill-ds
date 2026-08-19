@@ -63,6 +63,15 @@ from selenium.common.exceptions import (
 
 WIZARD_URL = "https://pptform.state.gov/PassportWizardMain.aspx"
 DOWNLOAD_DIR = Path(__file__).parent / "downloaded_pdfs"  # local staging only - uploaded to Drive after each run
+# Dedicated, isolated Chrome profile for the bot - never the staff member's
+# own real Chrome profile. Confirmed live 2026-08-12: without an explicit
+# --user-data-dir, uc.Chrome() launched into the real shared Chrome profile
+# store on a multi-profile staff machine, triggering the "Continue as
+# <name>?" profile picker and first-run onboarding screens on every run -
+# both blocked the bot waiting on a dialog no one was there to click. A
+# fixed, separate profile directory has exactly one identity (no picker)
+# and persists between runs (no repeat first-run screens after the first).
+CHROME_PROFILE_DIR = Path(__file__).parent / "chrome_profile"
 
 NEXT_BUTTON = "#PassportWizard_StepNavigationTemplateContainerID_StartNextPreviousButton"
 # The Fees step is the wizard's last step - ASP.NET Wizard controls swap in a
@@ -163,6 +172,33 @@ def _accept_stray_alert(driver):
         return True
     except NoAlertPresentException:
         return False
+
+
+def _collect_visible_validation_errors(driver) -> list:
+    """Site-wide pattern confirmed live 2026-08-14: every field on this
+    site has its own <span class="invalid_icon"> validation message,
+    hidden (display:none) until that specific field's validation actually
+    fires - e.g. "Incorrect email address. See help tip." next to Email
+    Address. Scanning for the ones actually visible turns an opaque
+    Selenium/native-stacktrace failure into the same plain-English message
+    a human looking at the browser would see - genuinely different from
+    _accept_stray_alert's dialog-box case above (no dialog fires for this
+    kind), so this is a separate check, not a duplicate."""
+    try:
+        spans = driver.find_elements(By.CSS_SELECTOR, "span.invalid_icon")
+    except Exception:
+        return []
+    seen = set()
+    messages = []
+    for span in spans:
+        try:
+            text = span.text.strip()
+            if text and span.is_displayed() and text not in seen:
+                seen.add(text)
+                messages.append(text)
+        except Exception:
+            continue
+    return messages
 
 
 def find(driver, selector, condition=EC.presence_of_element_located, timeout=DEFAULT_WAIT):
@@ -828,6 +864,66 @@ def click_finish(driver):
 # Main
 # ---------------------------------------------------------------------------
 
+CHROME_PATHS = [
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+]
+
+
+def _detect_chrome_major_version():
+    """Reads the installed Chrome's major version directly from chrome.exe's
+    file version resource, so the chromedriver pin below never goes stale
+    silently again. Real failure, 2026-08-12: version_main was hardcoded to
+    150; Chrome auto-updated itself to 151 (as it does, unattended) and
+    every run since then crashed instantly with an opaque chromedriver
+    native stacktrace (no readable message) - looked like a random crash
+    until traced to this exact mismatch.
+
+    Deliberately NOT `chrome.exe --version` via subprocess - tried that
+    first, but Chrome frequently keeps a background process alive after all
+    windows close, and in that case a new `chrome.exe --version` call just
+    hands off to the existing session and prints "Opening in existing
+    browser session." instead of a version string (confirmed live on this
+    machine). Reading the file's own VS_FIXEDFILEINFO version resource via
+    ctypes (stdlib only, no pywin32 dependency) sidesteps that entirely -
+    it's a property of the file on disk, independent of whether Chrome
+    happens to be running.
+
+    Returns None if chrome.exe isn't found at either standard path or the
+    resource can't be read, letting uc.Chrome() fall back to its own (less
+    reliable, per the comment this replaces) auto-detection rather than
+    hard-failing here."""
+    import ctypes
+    from ctypes import wintypes
+
+    class _VS_FIXEDFILEINFO(ctypes.Structure):
+        _fields_ = [
+            ("dwSignature", wintypes.DWORD), ("dwStrucVersion", wintypes.DWORD),
+            ("dwFileVersionMS", wintypes.DWORD), ("dwFileVersionLS", wintypes.DWORD),
+            ("dwProductVersionMS", wintypes.DWORD), ("dwProductVersionLS", wintypes.DWORD),
+            ("dwFileFlagsMask", wintypes.DWORD), ("dwFileFlags", wintypes.DWORD),
+            ("dwFileOS", wintypes.DWORD), ("dwFileType", wintypes.DWORD),
+            ("dwFileSubtype", wintypes.DWORD), ("dwFileDateMS", wintypes.DWORD),
+            ("dwFileDateLS", wintypes.DWORD),
+        ]
+
+    for path in CHROME_PATHS:
+        if not Path(path).exists():
+            continue
+        try:
+            size = ctypes.windll.version.GetFileVersionInfoSizeW(path, None)
+            buf = ctypes.create_string_buffer(size)
+            ctypes.windll.version.GetFileVersionInfoW(path, 0, size, buf)
+            value = ctypes.c_void_p()
+            value_len = wintypes.UINT()
+            ctypes.windll.version.VerQueryValueW(buf, "\\", ctypes.byref(value), ctypes.byref(value_len))
+            info = ctypes.cast(value, ctypes.POINTER(_VS_FIXEDFILEINFO)).contents
+            return info.dwFileVersionMS >> 16
+        except Exception:
+            continue
+    return None
+
+
 def build_driver():
     # headed on purpose - see module docstring; do NOT add --headless.
     # Plain Selenium/ChromeDriver gets 403-blocked by Cloudflare specifically
@@ -842,10 +938,11 @@ def build_driver():
         "download.prompt_for_download": False,
         "plugins.always_open_pdf_externally": True,  # download PDFs instead of opening Chrome's viewer
     })
-    # version_main pinned to the installed Chrome's major version - uc's
-    # auto-detection grabbed a mismatched chromedriver (151 vs installed 150)
-    # on this machine otherwise.
-    return uc.Chrome(options=options, version_main=150)
+    CHROME_PROFILE_DIR.mkdir(exist_ok=True)
+    options.add_argument(f"--user-data-dir={CHROME_PROFILE_DIR}")
+    options.add_argument("--no-first-run")
+    options.add_argument("--no-default-browser-check")
+    return uc.Chrome(options=options, version_main=_detect_chrome_major_version())
 
 
 # Digit-string fields where Google Sheets silently mis-typing the value as a
@@ -957,12 +1054,28 @@ def run_one(data: dict) -> Path:
         driver.save_screenshot(str(debug_png))
         debug_html.write_text(driver.page_source, encoding="utf-8")
         log(f"Failure - saved debug/fail_{stamp}.png and .html")
+
+        # If the site's own inline validation is what actually failed us,
+        # surface ITS plain-English message instead of the raw Selenium/
+        # native-driver exception - confirmed live 2026-08-14: staff saw an
+        # unreadable native stacktrace ("Message: \nStacktrace:\n\t...")
+        # for what was, on screen, just "Incorrect email address. See help
+        # tip." next to an empty field. The original exception is still
+        # logged (not lost) for when *I* need to debug the underlying
+        # Selenium/site issue - only what lands in the Sheet's Notes column
+        # (a human, not code, reading it) gets replaced.
+        validation_errors = _collect_visible_validation_errors(driver)
+        if validation_errors:
+            log(f"  Visible field-validation error(s) on page: {validation_errors}")
+            log(f"  (original exception: {e!r})")
+            e = FieldValidationError("האתר סימן שדה שגוי/חסר: " + " | ".join(validation_errors))
+
         # Attach paths to the exception so run_all() can upload them to Drive
         # too - debug/ is local to whichever computer ran this, but staff
         # could be on any machine, so the failure evidence needs to travel
         # with the applicant's own Sheet/folder, not stay stuck on one PC.
         e.debug_artifacts = (debug_png, debug_html)
-        raise
+        raise e
     finally:
         driver.quit()
 

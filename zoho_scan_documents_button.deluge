@@ -1,0 +1,44 @@
+// כפתור "סרוק מסמכים" - Deals. קטגוריית "button" דורשת חתימה מלאה
+// שמחזירה string (לא void, לא info) - המחרוזת המוחזרת היא ההודעה שתוצג
+// למשתמש אחרי הלחיצה.
+//
+// שולח רק folder_id - השירות בענן מוצא לבד את השיטס היחיד בתיקייה (אין
+// צורך לשמור/למסור קישור שיטס בזוהו בכלל).
+
+string button.scanClientDocuments(string recordId)
+{
+	dealRecord = zoho.crm.getRecordById("Deals", recordId);
+	folderLink = dealRecord.get("Test");
+
+	folderId = "";
+	if (folderLink != null && folderLink.contains("/folders/"))
+	{
+		folderId = folderLink.getSuffix("/folders/");
+		if (folderId.contains("?"))
+		{
+			folderId = folderId.getPrefix("?");
+		}
+		if (folderId.contains("/"))
+		{
+			folderId = folderId.getPrefix("/");
+		}
+	}
+
+	if (folderId == "")
+	{
+		return "לא נמצא קישור תיקייה בשדה Test";
+	}
+
+	paramMap = Map();
+	paramMap.put("folder_id", folderId);
+	paramMap.put("secret", "rseuVyGIbX95Ggv9mrteGYVDBXOMF406");
+
+	response = invokeurl
+	[
+		url: "https://autofill-intake-service-826386462532.me-west1.run.app/scan_client_documents"
+		type: POST
+		parameters: paramMap
+	];
+
+	return response.toString();
+}

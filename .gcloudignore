@@ -1,0 +1,10 @@
+# Cloud Build uploads the whole directory as build context unless told
+# otherwise - this folder has service_account.json, .env, and real client
+# PII (debug/, chrome_profile/, downloaded_pdfs/, bot_runtime/) that must
+# never leave this machine. Ignore everything, then explicitly allow only
+# the handful of files this specific build actually needs.
+*
+!requirements-intake.txt
+!Dockerfile.intake
+!extract_client_intake.py
+!intake_service.py
