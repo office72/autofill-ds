@@ -435,7 +435,18 @@ def step_address(driver, d):
     select_option(driver, p + "mailCountryList", mail_country)
     if country_is_usa(mail_country):
         select_option(driver, p + "mailStateList", d.get("Mail State (USA only)"))
-        fill_text(driver, p + "mailZipTextBox", d.get("Mail Zip"))  # site validates xxxxx/xxxxx-xxxx only - US-only field
+        mail_zip = d.get("Mail Zip")
+    else:
+        # The field itself only accepts xxxxx/xxxxx-xxxx (US format), but it
+        # still prints on the final PDF for a non-US address (confirmed
+        # live 2026-08-20: a real Israeli mailing address left this box
+        # blank on the printed DS-11 even though a real 7-digit zip was
+        # sitting right there in the Sheet) - same "not a real US zip, just
+        # satisfies the site's validation" placeholder trick already used
+        # for the required EC Zip field below, applied here too instead of
+        # skipping the field outright.
+        mail_zip = us_zip_prefix(d.get("Mail Zip"))
+    fill_text(driver, p + "mailZipTextBox", mail_zip)
     fill_text(driver, p + "mailCareOfTextBox", d.get("In Care Of"))
 
     same_as_permanent = d.get("Same As Permanent Address?")
@@ -450,7 +461,10 @@ def step_address(driver, d):
         select_option(driver, p + "permanentCountryList", perm_country)
         if country_is_usa(perm_country):
             select_option(driver, p + "permanentStateList", d.get("Permanent State (USA only)"))
-            fill_text(driver, p + "permanentZipTextBox", d.get("Permanent Zip"))  # US-only field, see mailZipTextBox note
+            perm_zip = d.get("Permanent Zip")
+        else:
+            perm_zip = us_zip_prefix(d.get("Permanent Zip"))  # see mailZipTextBox note above
+        fill_text(driver, p + "permanentZipTextBox", perm_zip)
 
     comm = str(d.get("Preferred Communication") or "Mail").strip().lower()
     if comm == "email":
@@ -462,6 +476,19 @@ def step_address(driver, d):
 
     fill_text(driver, p + "emailTextBox", d.get("Email"))
     fill_text(driver, p + "confirmEmailTextBox", d.get("Confirm Email"))
+
+    # "Your Phone Number" - a separate required text+type+"Add" grid, not a
+    # plain textbox (confirmed live 2026-08-20, found by inspecting a saved
+    # copy of this page's HTML - element IDs were never documented before
+    # this since the field had no Sheet column at all until today). Typing
+    # the number alone isn't enough - the type radio must be selected and
+    # the Add button clicked, or the number is never actually registered.
+    phone = digits_only(d.get("Phone"))
+    if phone:
+        fill_text(driver, p + "addPhoneNumberTextBox", phone)
+        check(driver, p + "PhoneNumberType_2")  # Cell
+        click(driver, p + "addPhoneNumberButton")
+        pause_between_fields()
 
     click_next(driver)
 
@@ -951,7 +978,7 @@ def build_driver():
 # number legitimately reads back as an int too), but a NEGATIVE number is an
 # unambiguous tell: nobody's SSN/zip/phone/book number is negative, so it
 # can only be Sheets having evaluated a leading "+"/"-" as arithmetic.
-NUMERIC_FIELDS_REJECT_NEGATIVE = ("EC Phone", "SSN", "USCIS A-Number", "Book Number", "Mail Zip", "Permanent Zip", "EC Zip")
+NUMERIC_FIELDS_REJECT_NEGATIVE = ("Phone", "EC Phone", "SSN", "USCIS A-Number", "Book Number", "Mail Zip", "Permanent Zip", "EC Zip")
 
 
 def _validate_applicant_data(data: dict):

@@ -10,11 +10,9 @@ use) since a click has no parent terminal for staff to read results in.
 """
 
 import sys
+import traceback
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
-
-sys.path.insert(0, str(Path(__file__).parent))
-import launcher
 
 
 def main():
@@ -41,4 +39,25 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Everything (including the `import launcher` above main() used to sit
+    # at module level) is now inside this try/except - confirmed live
+    # 2026-08-20: on a machine where pip install had failed partway
+    # (missing google-api-python-client, not just selenium - a NetFree
+    # content filter blocking PyPI), `import launcher` itself raised
+    # ModuleNotFoundError before execution ever reached main()'s own
+    # "Press Enter to close" safety nets, so the window flashed the
+    # traceback and closed too fast to read. This can never happen again
+    # regardless of what fails or at what stage - every path now ends in
+    # the same pause.
+    try:
+        sys.path.insert(0, str(Path(__file__).parent))
+        import launcher
+
+        main()
+    except SystemExit:
+        raise
+    except Exception:
+        print("[launcher_url] Unexpected error:\n")
+        traceback.print_exc()
+        input("\nPress Enter to close...")
+        sys.exit(1)

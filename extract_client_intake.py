@@ -164,6 +164,10 @@ FILLOUT_TARGET_SCHEMA = {
         "Mail Country": {"type": ["string", "null"], "description": "English, e.g. 'Israel'"},
         "Mail Zip": {"type": ["string", "null"]},
         "Email": {"type": ["string", "null"]},
+        "Phone": {
+            "type": ["string", "null"],
+            "description": "The applicant's own primary contact phone (mobile/cell), digits only no leading +. This is the person's own number - not the emergency contact's, which is a separate EC Phone field.",
+        },
         "Trip Date": {"type": ["string", "null"], "description": "MM/DD/YYYY"},
         "Trip Return Date": {"type": ["string", "null"], "description": "MM/DD/YYYY"},
         "Countries To Be Visited": {"type": ["string", "null"]},

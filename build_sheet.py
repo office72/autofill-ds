@@ -158,6 +158,7 @@ SECTIONS = [
         ("Preferred Communication", "COMMUNICATION", "R"),
         ("Email", None, "R"),
         ("Confirm Email", None, "R"),
+        ("Phone", None, "R"),  # DS-11 item 9, "Primary Contact Phone Number" - the applicant's own, separate from EC Phone
     ]),
     ("EMERGENCY CONTACT", "FCE4D6", [
         ("EC Name", None, "R"),
