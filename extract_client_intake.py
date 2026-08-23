@@ -309,7 +309,32 @@ def extract_fillout_data(fillout_text: str) -> dict:
         data["Height Feet"] = str(feet)
         data["Height Inches"] = str(inches)
 
+    for phone_field in ("Phone", "EC Phone"):
+        if data.get(phone_field):
+            data[phone_field] = _local_israeli_phone(data[phone_field])
+
     return {k: v for k, v in data.items() if v not in (None, "")}
+
+
+def _local_israeli_phone(digits: str) -> str:
+    """Per the user (2026-08-23): prefer local Israeli format (leading 0)
+    over the international one (972 country code) for readability, but
+    ONLY when the number is actually Israeli - there's no equivalent
+    "drop the country code, add a 0" convention for other countries, so a
+    foreign number is left exactly as extracted (still just digits, no
+    "+", which is already safe - see the Sheets-arithmetic bug elsewhere
+    in this project). Detection: Israeli mobile/landline numbers are 9
+    digits after the "972" country code (e.g. 972 533587247 -> 0533587247).
+    Also catches the same number missing its leading 0 with NO country
+    code either (confirmed live 2026-08-23: a real Fillout answer for EC
+    Phone was typed as bare "544377954", 9 digits starting with the
+    Israeli mobile prefix 5x - not something the country-code check above
+    catches at all, since there's no "972" to strip)."""
+    if digits.startswith("972") and len(digits) == 12:
+        return "0" + digits[3:]
+    if len(digits) == 9 and digits[0] == "5":
+        return "0" + digits
+    return digits
 
 
 # ---------------------------------------------------------------------------

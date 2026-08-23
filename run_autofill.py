@@ -375,10 +375,22 @@ def select_option(driver, selector, value):
             sel.select_by_visible_text(option.text)
             pause_between_fields()
             return
+    # Some dropdowns (e.g. State/Territory of Birth) show options as
+    # "XX - STATE NAME" (a two-letter code plus the full name) - confirmed
+    # live 2026-08-23: an AI-extracted "State of Birth" value is naturally
+    # just the bare state name ("NEW YORK"), which the exact match above
+    # doesn't catch, crashing the whole run on an otherwise-correct value.
+    # Retry against just the part after "XX - ".
+    for option in sel.options:
+        text = option.text.strip().lower()
+        if " - " in text and target == text.split(" - ", 1)[1].strip():
+            sel.select_by_visible_text(option.text)
+            pause_between_fields()
+            return
     raise NoSuchElementException(
-        f"No option matching {value!r} (case-insensitive, checked both visible text "
-        f"and value attribute) in {selector} - the sheet's spelling may not match "
-        f"the site's dropdown exactly."
+        f"No option matching {value!r} (case-insensitive, checked visible text, "
+        f"value attribute, and the part after 'XX - ') in {selector} - the sheet's "
+        f"spelling may not match the site's dropdown exactly."
     )
 
 
