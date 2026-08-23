@@ -103,6 +103,70 @@ def extract_docx_text(file_bytes: bytes) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Country-of-Birth sanity check - confirmed live 2026-08-23: a passport
+# vision extraction hallucinated "Outagamie" (a WISCONSIN COUNTY, not a
+# country at all) into "Country of Birth" for a passport whose bio page
+# only prints "WISCONSIN, U.S.A." with no county/city shown anywhere - a
+# real Opus hallucination, not a code bug, and not reproducible on retry.
+# Because that value happened to not match the site's dropdown, the run
+# crashed loudly and got caught - but a hallucinated value that DID happen
+# to look like a real country would have gone completely unnoticed straight
+# into a real government form. This is a defensive backstop, not a fix for
+# the hallucination itself (which can't be prevented with certainty) - it
+# just refuses to let a "Country of Birth" value survive if it isn't
+# actually a country, dropping it (safe - a human reviews the blank field)
+# rather than passing through - the same "missing is safe, wrong isn't"
+# principle used everywhere else in this file.
+# ---------------------------------------------------------------------------
+
+_COUNTRY_NAMES = {
+    "AFGHANISTAN", "ALBANIA", "ALGERIA", "ANDORRA", "ANGOLA", "ANTIGUA AND BARBUDA",
+    "ARGENTINA", "ARMENIA", "AUSTRALIA", "AUSTRIA", "AZERBAIJAN", "BAHAMAS", "BAHRAIN",
+    "BANGLADESH", "BARBADOS", "BELARUS", "BELGIUM", "BELIZE", "BENIN", "BHUTAN",
+    "BOLIVIA", "BOSNIA AND HERZEGOVINA", "BOTSWANA", "BRAZIL", "BRUNEI", "BULGARIA",
+    "BURKINA FASO", "BURUNDI", "CABO VERDE", "CAMBODIA", "CAMEROON", "CANADA",
+    "CENTRAL AFRICAN REPUBLIC", "CHAD", "CHILE", "CHINA", "COLOMBIA", "COMOROS",
+    "CONGO", "COSTA RICA", "CROATIA", "CUBA", "CYPRUS", "CZECHIA", "CZECH REPUBLIC",
+    "DENMARK", "DJIBOUTI", "DOMINICA", "DOMINICAN REPUBLIC", "ECUADOR", "EGYPT",
+    "EL SALVADOR", "EQUATORIAL GUINEA", "ERITREA", "ESTONIA", "ESWATINI", "ETHIOPIA",
+    "FIJI", "FINLAND", "FRANCE", "GABON", "GAMBIA", "GEORGIA", "GERMANY", "GHANA",
+    "GREECE", "GRENADA", "GUATEMALA", "GUINEA", "GUINEA-BISSAU", "GUYANA", "HAITI",
+    "HONDURAS", "HUNGARY", "ICELAND", "INDIA", "INDONESIA", "IRAN", "IRAQ", "IRELAND",
+    "ISRAEL", "ITALY", "IVORY COAST", "JAMAICA", "JAPAN", "JORDAN", "KAZAKHSTAN",
+    "KENYA", "KIRIBATI", "KOSOVO", "KUWAIT", "KYRGYZSTAN", "LAOS", "LATVIA", "LEBANON",
+    "LESOTHO", "LIBERIA", "LIBYA", "LIECHTENSTEIN", "LITHUANIA", "LUXEMBOURG",
+    "MADAGASCAR", "MALAWI", "MALAYSIA", "MALDIVES", "MALI", "MALTA",
+    "MARSHALL ISLANDS", "MAURITANIA", "MAURITIUS", "MEXICO", "MICRONESIA", "MOLDOVA",
+    "MONACO", "MONGOLIA", "MONTENEGRO", "MOROCCO", "MOZAMBIQUE", "MYANMAR", "NAMIBIA",
+    "NAURU", "NEPAL", "NETHERLANDS", "NEW ZEALAND", "NICARAGUA", "NIGER", "NIGERIA",
+    "NORTH KOREA", "NORTH MACEDONIA", "NORWAY", "OMAN", "PAKISTAN", "PALAU",
+    "PALESTINE", "PANAMA", "PAPUA NEW GUINEA", "PARAGUAY", "PERU", "PHILIPPINES",
+    "POLAND", "PORTUGAL", "QATAR", "ROMANIA", "RUSSIA", "RWANDA",
+    "SAINT KITTS AND NEVIS", "SAINT LUCIA", "SAINT VINCENT AND THE GRENADINES",
+    "SAMOA", "SAN MARINO", "SAO TOME AND PRINCIPE", "SAUDI ARABIA", "SENEGAL",
+    "SERBIA", "SEYCHELLES", "SIERRA LEONE", "SINGAPORE", "SLOVAKIA", "SLOVENIA",
+    "SOLOMON ISLANDS", "SOMALIA", "SOUTH AFRICA", "SOUTH KOREA", "SOUTH SUDAN",
+    "SPAIN", "SRI LANKA", "SUDAN", "SURINAME", "SWEDEN", "SWITZERLAND", "SYRIA",
+    "TAIWAN", "TAJIKISTAN", "TANZANIA", "THAILAND", "TIMOR-LESTE", "TOGO", "TONGA",
+    "TRINIDAD AND TOBAGO", "TUNISIA", "TURKEY", "TURKMENISTAN", "TUVALU", "UGANDA",
+    "UKRAINE", "UNITED ARAB EMIRATES", "UNITED KINGDOM", "URUGUAY", "UZBEKISTAN",
+    "VANUATU", "VATICAN CITY", "VENEZUELA", "VIETNAM", "YEMEN", "ZAMBIA", "ZIMBABWE",
+    # Common aliases/variants seen in real extractions
+    "USA", "UNITED STATES", "UNITED STATES OF AMERICA", "U.S.A.", "U.S.",
+    "UK", "U.K.", "GREAT BRITAIN", "ENGLAND", "SCOTLAND", "WALES",
+    "IVORY COAST", "COTE D'IVOIRE", "CÔTE D'IVOIRE",
+}
+
+
+def _validate_country_of_birth(data: dict, source_label: str) -> dict:
+    country = data.get("Country of Birth")
+    if country and country.strip().upper() not in _COUNTRY_NAMES:
+        print(f"  WARNING: dropping implausible Country of Birth {country!r} from {source_label} - not a recognized country name")
+        data.pop("Country of Birth")
+    return data
+
+
+# ---------------------------------------------------------------------------
 # Fillout extraction - one Haiku call, structured output.
 #
 # Fillout's export is the SAME fixed form every time (question -> answer
@@ -440,7 +504,8 @@ def extract_passport_data(image_bytes: bytes, mime_type: str) -> dict:
     )
     text = next(b.text for b in response.content if b.type == "text")
     data = _extract_first_json_object(text)
-    return {k: v for k, v in data.items() if v not in (None, "")}
+    data = {k: v for k, v in data.items() if v not in (None, "")}
+    return _validate_country_of_birth(data, "passport")
 
 
 def fetch_drive_file_bytes(drive, file_id: str) -> tuple[bytes, str]:
@@ -545,7 +610,8 @@ def extract_birth_cert_data(file_bytes: bytes, mime_type: str) -> dict:
     )
     text = next(b.text for b in response.content if b.type == "text")
     data = _extract_first_json_object(text)
-    return {k: v for k, v in data.items() if v not in (None, "")}
+    data = {k: v for k, v in data.items() if v not in (None, "")}
+    return _validate_country_of_birth(data, "birth certificate")
 
 
 # ---------------------------------------------------------------------------
@@ -663,7 +729,8 @@ def extract_citizenship_evidence_data(file_bytes: bytes, mime_type: str) -> dict
     )
     text = next(b.text for b in response.content if b.type == "text")
     data = _extract_first_json_object(text)
-    return {k: v for k, v in data.items() if v not in (None, "")}
+    data = {k: v for k, v in data.items() if v not in (None, "")}
+    return _validate_country_of_birth(data, "citizenship evidence")
 
 
 # ---------------------------------------------------------------------------
