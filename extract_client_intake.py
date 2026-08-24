@@ -79,6 +79,21 @@ def get_sheets_service():
     return build("sheets", "v4", credentials=_get_credentials())
 
 
+def _anthropic_client() -> anthropic.Anthropic:
+    """Every extraction/classification call in this file goes through this
+    instead of calling anthropic.Anthropic() directly - confirmed live
+    2026-08-24: a single transient "Overloaded" (529) response from the
+    API killed an entire multi-document scan outright (an unhandled
+    exception at the very first classify_document() call), leaving the
+    Sheet completely untouched with no Status/Notes at all - all the
+    other documents' work in that run was discarded too. The SDK already
+    retries transient errors (5xx, connection errors) with backoff on its
+    own; the default is just 2 attempts, which isn't much margin during a
+    real overload window - raised here rather than writing a custom retry
+    loop."""
+    return anthropic.Anthropic(max_retries=6)
+
+
 def fetch_doc_text(drive, doc_id: str) -> str:
     """Google Docs export as plain text - works for the Fillout submission
     summary doc without needing the Docs API (which isn't enabled on this
@@ -350,7 +365,7 @@ def extract_fillout_data(fillout_text: str) -> dict:
     # extractor in this file (all bumped for the same reason) - this
     # wasn't a fillout-specific problem, just the one that happened to get
     # caught first.
-    client = anthropic.Anthropic()
+    client = _anthropic_client()
     response = client.messages.create(
         model=SONNET_MODEL,
         max_tokens=4000,
@@ -488,7 +503,7 @@ def _content_block(file_bytes: bytes, mime_type: str) -> dict:
 
 
 def extract_passport_data(image_bytes: bytes, mime_type: str) -> dict:
-    client = anthropic.Anthropic()
+    client = _anthropic_client()
     response = client.messages.create(
         model=OPUS_MODEL,
         max_tokens=3000,  # headroom against invisible thinking tokens - see extract_fillout_data
@@ -594,7 +609,7 @@ CRITICAL RULES:
 
 
 def extract_birth_cert_data(file_bytes: bytes, mime_type: str) -> dict:
-    client = anthropic.Anthropic()
+    client = _anthropic_client()
     response = client.messages.create(
         model=OPUS_MODEL,
         max_tokens=3000,  # headroom against invisible thinking tokens - see extract_fillout_data
@@ -713,7 +728,7 @@ CRITICAL RULES:
 
 
 def extract_citizenship_evidence_data(file_bytes: bytes, mime_type: str) -> dict:
-    client = anthropic.Anthropic()
+    client = _anthropic_client()
     response = client.messages.create(
         model=OPUS_MODEL,
         max_tokens=3000,  # headroom against invisible thinking tokens - see extract_fillout_data
@@ -770,7 +785,7 @@ number isn't clearly legible, leave it null rather than guessing a digit.
 
 
 def extract_ssn_card_data(file_bytes: bytes, mime_type: str) -> dict:
-    client = anthropic.Anthropic()
+    client = _anthropic_client()
     response = client.messages.create(
         model=OPUS_MODEL,
         max_tokens=1000,  # headroom against invisible thinking tokens - see extract_fillout_data
@@ -833,7 +848,7 @@ def classify_document(file_bytes: bytes, mime_type: str, filename: str = "") -> 
     # (classification gates whether the expensive extraction+write happens
     # at all, so a false negative here is worse than Opus's still-
     # negligible extra cost - see project memory).
-    client = anthropic.Anthropic()
+    client = _anthropic_client()
     response = client.messages.create(
         model=OPUS_MODEL,
         max_tokens=150,  # headroom against invisible thinking tokens - see extract_fillout_data
