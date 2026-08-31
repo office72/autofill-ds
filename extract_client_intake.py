@@ -811,6 +811,168 @@ def extract_ssn_card_data(file_bytes: bytes, mime_type: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Filled DS-11/DS-82/DS-5504 form extraction - per the user (2026-08-24):
+# several real client folders throughout this project had an
+# already-filled government passport-application form uploaded (a client's
+# own draft, or a prior year's submission) that was always classified
+# OTHER and completely ignored. When there's no Fillout submission at all
+# (or the Fillout variant used didn't ask a given question), this is a
+# real, comprehensive alternative source - it's essentially the same
+# fields as Fillout, plus identity/passport-book/permanent-address fields
+# Fillout never asks. Deliberately does NOT touch Passport Scenario,
+# Book Issue Date, or anything else that's a staff judgment call, even
+# though a filled form obviously implies a scenario - that decision stays
+# with a human reviewing the actual documents, matching this whole
+# project's "AI only extracts, never decides eligibility" boundary.
+# ---------------------------------------------------------------------------
+
+DS_FORM_TARGET_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [],
+    "properties": {
+        "First Name": {"type": ["string", "null"]},
+        "Middle Name": {"type": ["string", "null"]},
+        "Last Name": {"type": ["string", "null"]},
+        "Date of Birth": {"type": ["string", "null"], "description": "MM/DD/YYYY"},
+        "Sex": {"type": "string", "enum": ["Male", "Female"]},
+        "City of Birth": {"type": ["string", "null"]},
+        "Country of Birth": {"type": ["string", "null"], "description": "English. If a US state is shown as place of birth (no separate country field), this is 'USA'."},
+        "State of Birth (USA only)": {"type": ["string", "null"], "description": "Only if place of birth shown is a US state"},
+        "SSN": {
+            "type": ["string", "null"],
+            "description": "Digits only, no dashes. Leave null if the form's answer is an obvious placeholder rather than a real number (all zeros, all the same digit, or fewer than 9 digits).",
+        },
+        "USCIS A-Number": {"type": ["string", "null"], "description": "Nine-digit number, only if filled in - most applicants leave this blank"},
+        "Hair Color": {"type": "string", "enum": ["BLACK", "BLONDE", "BROWN", "RED", "GRAY", "BALD", "OTHER"]},
+        "Eye Color": {"type": "string", "enum": ["AMBER", "BLACK", "BLUE", "BROWN", "GRAY", "GREEN", "HAZEL"]},
+        "Occupation": {"type": ["string", "null"]},
+        "Employer": {"type": ["string", "null"]},
+        "height_feet_decimal": {
+            "type": ["number", "null"],
+            "description": "The form shows height already as feet+inches (e.g. \"5ft. 2in.\") - convert to a single decimal-feet number yourself here (5 ft 2 in -> 5.1666...), a later step converts it back to feet/inches for the Sheet.",
+        },
+        "Ever Married?": {"type": "string", "enum": ["Yes", "No"]},
+        "Parent 1 First & Middle Name": {"type": ["string", "null"]},
+        "Parent 1 Last Name": {"type": ["string", "null"]},
+        "Parent 1 Date of Birth": {"type": ["string", "null"], "description": "MM/DD/YYYY"},
+        "Parent 1 Place of Birth": {"type": ["string", "null"], "description": "City, Country - English"},
+        "Parent 1 US Citizen?": {"type": "string", "enum": ["Yes", "No"]},
+        "Parent 2 First & Middle Name": {"type": ["string", "null"]},
+        "Parent 2 Last Name": {"type": ["string", "null"]},
+        "Parent 2 Date of Birth": {"type": ["string", "null"], "description": "MM/DD/YYYY"},
+        "Parent 2 Place of Birth": {"type": ["string", "null"], "description": "City, Country - English"},
+        "Parent 2 US Citizen?": {"type": "string", "enum": ["Yes", "No"]},
+        "Spouse First & Middle Name": {"type": ["string", "null"], "description": "Only if Ever Married? is Yes"},
+        "Spouse Last Name": {"type": ["string", "null"]},
+        "Spouse Date of Birth": {"type": ["string", "null"], "description": "MM/DD/YYYY"},
+        "Spouse Place of Birth": {"type": ["string", "null"], "description": "City, Country - English"},
+        "Spouse US Citizen?": {"type": "string", "enum": ["Yes", "No"]},
+        "Marriage Date": {"type": ["string", "null"], "description": "MM/DD/YYYY"},
+        "Ever Divorced or Widowed?": {"type": "string", "enum": ["Yes", "No"]},
+        "Divorce Date": {"type": ["string", "null"], "description": "MM/DD/YYYY - only if Ever Divorced or Widowed? is Yes"},
+        "Mail Street": {"type": ["string", "null"]},
+        "Mail City": {"type": ["string", "null"]},
+        "Mail Country": {"type": ["string", "null"], "description": "English, e.g. 'Israel'"},
+        "Mail State (USA only)": {"type": ["string", "null"]},
+        "Mail Zip": {"type": ["string", "null"]},
+        "Email": {"type": ["string", "null"]},
+        "Phone": {"type": ["string", "null"], "description": "The applicant's own primary contact phone, digits only no leading +"},
+        "Permanent Street": {"type": ["string", "null"], "description": "Only if a separate Permanent Address section is filled in (different from the mailing address)"},
+        "Permanent City": {"type": ["string", "null"]},
+        "Permanent Country": {"type": ["string", "null"]},
+        "Permanent State (USA only)": {"type": ["string", "null"]},
+        "Permanent Zip": {"type": ["string", "null"]},
+        "Trip Date": {"type": ["string", "null"], "description": "MM/DD/YYYY"},
+        "Trip Return Date": {"type": ["string", "null"], "description": "MM/DD/YYYY"},
+        "Countries To Be Visited": {"type": ["string", "null"]},
+        "EC Name": {"type": ["string", "null"], "description": "Emergency contact full name - English"},
+        "EC Relationship": {"type": ["string", "null"], "description": "English, e.g. 'Mother'"},
+        "EC Phone": {"type": ["string", "null"], "description": "Digits only, no leading +"},
+        "EC Address": {"type": ["string", "null"], "description": "Street + house number - English"},
+        "EC City": {"type": ["string", "null"]},
+        "EC Country": {"type": ["string", "null"]},
+        "EC State (USA only)": {"type": ["string", "null"]},
+        "EC Zip": {"type": ["string", "null"]},
+        "EC Email": {"type": ["string", "null"]},
+        "Name On Book - First": {"type": ["string", "null"], "description": "From 'Name printed on your most recent book', only if this section is filled in"},
+        "Name On Book - Last": {"type": ["string", "null"]},
+        "Other Name 1 - First": {"type": ["string", "null"], "description": "From 'List all other names you have used', only if actually filled in"},
+        "Other Name 1 - Last": {"type": ["string", "null"]},
+        "Other Name 2 - First": {"type": ["string", "null"]},
+        "Other Name 2 - Last": {"type": ["string", "null"]},
+    },
+}
+
+DS_FORM_SYSTEM_PROMPT = """\
+You are reading an already-filled DS-11, DS-82, or DS-5504 US passport
+application form (a client's own draft, or a prior submission) for an
+Israeli-based American Docs client - not a blank template, an actual
+filled-in copy with real handwritten or typed answers.
+
+CRITICAL RULES:
+- Extract only what is actually filled in on the form. Leave a field null
+  if that section of the form is blank, illegible, or not applicable to
+  this particular filing - a human reviews every field against the
+  original document afterward, so a missing field is safe and a wrong or
+  invented one is not.
+- Do NOT extract or infer anything about which scenario this form
+  represents (first-time, renewal, lost/stolen, name change, limited
+  validity, etc.) - that is a staff decision made by reviewing the actual
+  documents, not something to read off a checkbox and pass through
+  blindly, even if a box is checked.
+- Dates: MM/DD/YYYY, converting from whatever order is printed/written.
+- Phone numbers and SSN: digits only, no dashes, no "+".
+- If the same field appears more than once on the form (e.g. name and
+  date of birth repeated on page 2), use whichever instance is clearer -
+  don't report inconsistent values for the same field.
+"""
+
+
+def extract_ds_form_data(file_bytes: bytes, mime_type: str) -> dict:
+    client = _anthropic_client()
+    response = client.messages.create(
+        model=OPUS_MODEL,
+        max_tokens=4000,  # headroom against invisible thinking tokens - see extract_fillout_data; also a genuinely large schema
+        system=(
+            DS_FORM_SYSTEM_PROMPT
+            + "\n\nRespond with ONLY a JSON object (no other text). Possible keys, "
+            + f"and what each one means:\n{_field_hint_lines(DS_FORM_TARGET_SCHEMA)}\n\n"
+            + "Include a key ONLY when the form actually shows a value for it. "
+            + 'Do not include a key at all if there is no visible value for it - '
+            + 'never invent a placeholder like "string" or "N/A" or your own '
+            + "guess just to fill the key in. An omitted key and a wrong value "
+            + "are not equally bad - a wrong or fabricated value is far worse, "
+            + "because nothing will flag it for the human reviewer to catch."
+        ),
+        messages=[
+            {
+                "role": "user",
+                "content": [_content_block(file_bytes, mime_type), {"type": "text", "text": "Extract the fields from this filled passport application form."}],
+            }
+        ],
+    )
+    text = next(b.text for b in response.content if b.type == "text")
+    data = _extract_first_json_object(text)
+
+    feet_decimal = data.pop("height_feet_decimal", None)
+    if feet_decimal is not None:
+        feet = int(feet_decimal)
+        inches = round((feet_decimal - feet) * 12)
+        if inches == 12:
+            feet, inches = feet + 1, 0
+        data["Height Feet"] = str(feet)
+        data["Height Inches"] = str(inches)
+
+    for phone_field in ("Phone", "EC Phone"):
+        if data.get(phone_field):
+            data[phone_field] = _local_israeli_phone(data[phone_field])
+
+    data = {k: v for k, v in data.items() if v not in (None, "")}
+    return _validate_country_of_birth(data, "filled DS form")
+
+
+# ---------------------------------------------------------------------------
 # Document classification - one cheap Haiku vision call per image/PDF file
 # found in a client's folder, so the expensive Opus extraction only runs on
 # files actually worth it. Also drives the auto-rename the user asked for
@@ -874,8 +1036,14 @@ def classify_document(file_bytes: bytes, mime_type: str, filename: str = "") -> 
             "SSN_CARD - a US Social Security card ('SOCIAL SECURITY' "
             "header, a 9-digit number, 'This number has been established "
             "for...')\n"
-            "OTHER - anything else at all (forms, payment receipts, sworn "
-            "statements/affidavits, other ID cards, etc.)"
+            "DS_FORM - an ALREADY-FILLED-IN copy of a DS-11, DS-82, or "
+            "DS-5504 US passport application form itself (has real "
+            "handwritten or typed answers in its boxes - name, address, "
+            "parents, etc.) - not a blank template, and not the small "
+            "instruction pages, but the actual filled application pages.\n"
+            "OTHER - anything else at all (payment receipts, sworn "
+            "statements/affidavits, other ID cards, appointment "
+            "confirmations, etc.)"
         ),
         messages=[
             {
@@ -885,7 +1053,7 @@ def classify_document(file_bytes: bytes, mime_type: str, filename: str = "") -> 
         ],
     )
     text = next(b.text for b in response.content if b.type == "text").strip().upper()
-    for label in ("PASSPORT", "ISRAELI_BIRTH_CERTIFICATE", "CITIZENSHIP_EVIDENCE", "SSN_CARD"):
+    for label in ("PASSPORT", "ISRAELI_BIRTH_CERTIFICATE", "CITIZENSHIP_EVIDENCE", "SSN_CARD", "DS_FORM"):
         if label in text:
             return label
     return "OTHER"
@@ -896,12 +1064,14 @@ DOC_TYPE_LABELS = {
     "ISRAELI_BIRTH_CERTIFICATE": "Birth Certificate",
     "SSN_CARD": "SSN Card",
     "CITIZENSHIP_EVIDENCE": "Citizenship Evidence",
+    "DS_FORM": "Filled Application Form",
 }
 EXTRACTORS_BY_TYPE = {
     "PASSPORT": extract_passport_data,
     "ISRAELI_BIRTH_CERTIFICATE": extract_birth_cert_data,
     "CITIZENSHIP_EVIDENCE": extract_citizenship_evidence_data,
     "SSN_CARD": extract_ssn_card_data,
+    "DS_FORM": extract_ds_form_data,
 }
 
 # Fields that describe the family, not one specific applicant - siblings
@@ -1023,6 +1193,7 @@ def scan_and_build(drive, folder_id: str, spreadsheet_id: str, rename_files: boo
         "ISRAELI_BIRTH_CERTIFICATE": "birth_cert",
         "CITIZENSHIP_EVIDENCE": "citizenship_evidence",
         "SSN_CARD": "ssn_card",
+        "DS_FORM": "ds_form",
     }
     groups = {}
     order = []
@@ -1134,7 +1305,7 @@ def scan_and_build(drive, folder_id: str, spreadsheet_id: str, rename_files: boo
                     continue
                 print(f"  reconciling {key_b[0]} {key_b[1]} into {key_a[0]} {key_a[1]} (shared Date of Birth)")
                 groups[key_a]["docs"].extend(groups[key_b]["docs"])
-                for type_key in ("passport", "birth_cert", "citizenship_evidence", "ssn_card"):
+                for type_key in ("passport", "birth_cert", "citizenship_evidence", "ssn_card", "ds_form"):
                     if type_key not in groups[key_b]:
                         continue
                     if type_key == "passport":
@@ -1179,7 +1350,11 @@ def scan_and_build(drive, folder_id: str, spreadsheet_id: str, rename_files: boo
             unmatched_fillout.append((name, fillout_data))
 
     # Merge priority, weakest to strongest (later calls override earlier
-    # keys): Fillout is self-reported, weakest. The Israeli birth
+    # keys): a filled DS-11/82/5504 form is the weakest of all - per the
+    # user (2026-08-24), it's meant purely as a gap-filler for when there's
+    # no Fillout submission at all, or the Fillout variant used didn't ask
+    # a given question, so anything Fillout DOES answer should win over it.
+    # Fillout itself is self-reported, still weak. The Israeli birth
     # certificate is the original documentary source but isn't tied to
     # whatever English spelling the US government actually uses.
     # Citizenship-evidence documents (CRBA/Certificate of Citizenship/US
@@ -1195,6 +1370,7 @@ def scan_and_build(drive, folder_id: str, spreadsheet_id: str, rename_files: boo
     merged_by_key = {}
     for key in order:
         merged = {}
+        merged.update(groups[key].get("ds_form", {}))
         merged.update(fillout_by_key.get(key, {}))
         merged.update(groups[key].get("birth_cert", {}))
         merged.update(groups[key].get("citizenship_evidence", {}))
