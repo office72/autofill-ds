@@ -352,11 +352,28 @@ def _retry_on_stale(action, retries=2):
 def fill_text(driver, selector, value):
     if value is None or str(value).strip() == "":
         return
+    expected = format_value(value)
 
     def _do():
         el = find(driver, selector)
         el.clear()
-        _type_text(driver, el, format_value(value))
+        _type_text(driver, el, expected)
+        # Verify what actually landed in the DOM rather than trusting that
+        # dispatching each CDP key event means it was received - confirmed
+        # live 2026-08-31: an email field lost its trailing character
+        # ("...gmail.co" instead of "...gmail.com"), and since the Confirm
+        # Email field typed correctly, the site's own equality check caught
+        # the mismatch and crashed the run. One retry (re-clear, re-type)
+        # rather than a bigger fix, since this is presumably a rare
+        # dropped-event race in the per-character dispatch loop, not a
+        # deterministic bug - case-insensitive compare since some fields'
+        # own onkeypress handlers uppercase the stored value, not just the
+        # CSS text-transform display.
+        actual = (el.get_attribute("value") or "").strip()
+        if actual.upper() != str(expected).strip().upper():
+            log(f"  {selector}: got {actual!r} after typing, expected {expected!r} - retyping once")
+            el.clear()
+            _type_text(driver, el, expected)
 
     _retry_on_stale(_do)
     pause_between_fields()
