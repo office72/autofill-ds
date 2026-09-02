@@ -494,12 +494,34 @@ CRITICAL RULES:
 """
 
 
+_SUPPORTED_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+
+
 def _content_block(file_bytes: bytes, mime_type: str) -> dict:
     """Claude vision takes PDFs as a "document" block and images as an
-    "image" block - same base64 encoding either way."""
+    "image" block - same base64 encoding either way. Only 4 image formats
+    are accepted (jpeg/png/gif/webp) - confirmed live 2026-09-02: a staff
+    scanner had produced a .tif, and the API's own 400 error
+    ("media_type: Input should be 'image/jpeg', 'image/png', 'image/gif'
+    or 'image/webp'") crashed the whole scan outright, discarding every
+    other document's work in that run too, the same failure shape already
+    fixed once before for a transient 529 (see _anthropic_client). Rather
+    than just skipping an unsupported format and losing that document's
+    real data, convert it to PNG with Pillow first - staff scanners
+    commonly output TIFF/BMP, and there was no reason to make PDFs the
+    only "we'll handle whatever format you give us" case."""
+    if mime_type == "application/pdf":
+        return {"type": "document", "source": {"type": "base64", "media_type": mime_type, "data": base64.standard_b64encode(file_bytes).decode("ascii")}}
+    if mime_type not in _SUPPORTED_IMAGE_MIME_TYPES:
+        from io import BytesIO
+        from PIL import Image
+        with Image.open(BytesIO(file_bytes)) as img:
+            buf = BytesIO()
+            img.convert("RGB").save(buf, format="PNG")
+            file_bytes = buf.getvalue()
+        mime_type = "image/png"
     b64 = base64.standard_b64encode(file_bytes).decode("ascii")
-    block_type = "document" if mime_type == "application/pdf" else "image"
-    return {"type": block_type, "source": {"type": "base64", "media_type": mime_type, "data": b64}}
+    return {"type": "image", "source": {"type": "base64", "media_type": mime_type, "data": b64}}
 
 
 def extract_passport_data(image_bytes: bytes, mime_type: str) -> dict:

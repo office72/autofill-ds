@@ -6,3 +6,4 @@ google-auth
 anthropic
 python-dotenv
 pip-system-certs
+Pillow
