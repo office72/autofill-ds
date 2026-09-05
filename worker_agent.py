@@ -29,6 +29,7 @@ Usage:
 Stop with Ctrl+C. Runs forever, checking the queue on an interval.
 """
 
+import socket
 import sys
 import time
 import traceback
@@ -51,6 +52,17 @@ POLL_INTERVAL_SECONDS = 20
 STALE_JOB_TIMEOUT_MINUTES = 45
 
 COLUMNS = ["job_id", "sheet_id", "status", "requested_at", "started_at", "finished_at", "error"]
+
+WORKERS_SHEET_NAME = "Workers"
+WORKER_COLUMNS = ["worker_id", "last_seen", "status", "current_job_id"]
+# Hostname, not something hand-configured per machine - Contabo and this
+# local test box already have different hostnames, so every worker gets a
+# distinct identity for free with zero setup.
+WORKER_ID = socket.gethostname()
+# A control panel reading this tab treats a worker as offline once last_seen
+# is older than this - comfortably more than one poll interval so a single
+# slow cycle doesn't look like an outage.
+WORKER_OFFLINE_AFTER_MINUTES = 2
 
 
 def _now() -> str:
@@ -96,6 +108,32 @@ def _reclaim_stale_jobs(sheets):
             )
 
 
+def _heartbeat(sheets, status: str, current_job_id: str = ""):
+    """Writes/updates this machine's own row in the Workers tab - "I'm alive,
+    here's what I'm doing right now." A control panel reads this tab to show
+    which machines exist and what each one is up to; it never needs to
+    contact a machine directly."""
+    values = (
+        sheets.spreadsheets()
+        .values()
+        .get(spreadsheetId=QUEUE_SPREADSHEET_ID, range=f"{WORKERS_SHEET_NAME}!A2:D")
+        .execute()
+        .get("values", [])
+    )
+    row_number = next((i + 2 for i, row in enumerate(values) if row and row[0] == WORKER_ID), None)
+    values_row = [[WORKER_ID, _now(), status, current_job_id]]
+    if row_number:
+        sheets.spreadsheets().values().update(
+            spreadsheetId=QUEUE_SPREADSHEET_ID, range=f"{WORKERS_SHEET_NAME}!A{row_number}:D{row_number}",
+            valueInputOption="RAW", body={"values": values_row},
+        ).execute()
+    else:
+        sheets.spreadsheets().values().append(
+            spreadsheetId=QUEUE_SPREADSHEET_ID, range=f"{WORKERS_SHEET_NAME}!A:D",
+            valueInputOption="RAW", insertDataOption="INSERT_ROWS", body={"values": values_row},
+        ).execute()
+
+
 def _update_row(sheets, row_number: int, updates: dict):
     data = [
         {"range": f"{QUEUE_SHEET_NAME}!{chr(ord('A') + COLUMNS.index(col))}{row_number}", "values": [[value]]}
@@ -109,15 +147,18 @@ def _update_row(sheets, row_number: int, updates: dict):
 def main_loop():
     sheets = get_sheets_service()
     print(f"[worker_agent] Watching queue every {POLL_INTERVAL_SECONDS}s - Ctrl+C to stop.")
+    print(f"[worker_agent] Worker id: {WORKER_ID}")
     print(f"[worker_agent] Queue sheet: https://docs.google.com/spreadsheets/d/{QUEUE_SPREADSHEET_ID}")
 
     while True:
         try:
+            _heartbeat(sheets, "idle")
             _reclaim_stale_jobs(sheets)
             row_number, job = _find_pending_job(sheets)
             if job:
                 print(f"[worker_agent] Picked up job '{job['job_id']}' -> sheet {job['sheet_id']}")
                 _update_row(sheets, row_number, {"status": "running", "started_at": _now()})
+                _heartbeat(sheets, "busy", job["job_id"])
                 try:
                     exit_code = launcher.run_with_sheet(job["sheet_id"])
                     if exit_code == 0:
