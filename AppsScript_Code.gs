@@ -31,6 +31,17 @@ function runAutofill() {
 // כי Deluge לא יכול לחתום טוקן גוגל, ולכן ההגנה היא סוד-משותף בגוף הבקשה).
 var NEW_CLIENT_SECRET = 'KML6bPxugQABX4NPzDLzlwbA_hdIeDVY';
 
+// גיבוי ל"▶ הרץ" - נכתב לתוך כל עותק חדש (I1 בטאב Applicants) ברגע היצירה,
+// לא דרך נוסחה שמזהה את עצמה (CELL("filename") לא נתמך ב-Sheets - נבדק
+// ונכשל בפועל, #N/A). זו קריאה רגילה ל-https, לא passportbot:// ולא תפריט
+// Apps Script - עוקפת גם את חסימת נטפרי ל-Apps Script וגם כל תלות במחשב
+// המקומי: הקישור רק כותב שורה לתור עבודות, ומכונת עבודה (Contabo וכו')
+// מריצה את זה בפועל. ENQUEUE_SECRET הוא סוד נפרד מ-NEW_CLIENT_SECRET/
+// TRIGGER_SECRET במכוון - הוא יושב גלוי בנוסחה בתוך שיטס הלקוח, ומוגבל
+// ביכולת שלו (רק מוסיף לתור) כדי שדליפה משיטס לא תיתן גישה לשום דבר אחר.
+var ENQUEUE_SERVICE_URL = 'https://autofill-intake-service-826386462532.me-west1.run.app/enqueue';
+var ENQUEUE_SECRET = 'PASTE_THE_SECRET_HERE';
+
 function doPost(e) {
   return _handleNewClientRequest(e);
 }
@@ -56,6 +67,11 @@ function _handleNewClientRequest(e) {
     var templateFile = DriveApp.getFileById(SpreadsheetApp.getActiveSpreadsheet().getId());
     var targetFolder = DriveApp.getFolderById(folderId);
     var copy = templateFile.makeCopy('AUTOFILL - ' + clientName, targetFolder);
+
+    var runUrl = ENQUEUE_SERVICE_URL + '?sheet=' + copy.getId() + '&secret=' + ENQUEUE_SECRET;
+    var formula = '=HYPERLINK("' + runUrl + '","▶ הרץ (Contabo - גיבוי אם האוטופיל לא עובד)")';
+    SpreadsheetApp.openById(copy.getId()).getSheetByName('Applicants').getRange('I1').setFormula(formula);
+
     return _jsonOutput({
       status: 'ok',
       file_id: copy.getId(),
