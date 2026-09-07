@@ -44,7 +44,7 @@ QUEUE_SPREADSHEET_ID = "11Aj96yzN8TZpDJ92flJju3Bp4lyvKhrU4EeSBwgHZjo"
 # ever proved a deploy had actually landed. Checking this after every
 # `gcloud run deploy` closes that gap - no more trusting that a deploy
 # command exiting 0 means the new code is what's actually serving traffic.
-SERVICE_VERSION = "2026-09-05-2"
+SERVICE_VERSION = "2026-09-07-1"
 
 
 def _get_param(body, name):

@@ -368,7 +368,15 @@ def extract_fillout_data(fillout_text: str) -> dict:
     client = _anthropic_client()
     response = client.messages.create(
         model=SONNET_MODEL,
-        max_tokens=4000,
+        # Raised again from 4000 - root-caused live 2026-09-07 on a real
+        # case (Yosef Weiner) with parents+spouse+marriage/divorce+full
+        # address all filled in: the schema has grown since 4000 was set
+        # (SSN, Phone, full Spouse fields, EC Email, Parent 1/2 were added
+        # later), so a fully-populated real answer plus the same invisible
+        # thinking overhead described below can now exceed 4000 on its own
+        # - this crashed scan_client_documents outright (JSON cut off
+        # mid-value, "Unbalanced JSON in model response").
+        max_tokens=8000,
         system=(
             FILLOUT_SYSTEM_PROMPT
             + "\n\nRespond with ONLY a JSON object (no other text). Possible keys, "
