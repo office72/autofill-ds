@@ -993,6 +993,23 @@ def build_driver():
         "download.default_directory": str(DOWNLOAD_DIR),
         "download.prompt_for_download": False,
         "plugins.always_open_pdf_externally": True,  # download PDFs instead of opening Chrome's viewer
+        # Root-caused live 2026-09-07 on a real case (Yosef Weiner): the
+        # site rejected "Invalid format" on USCIS Registration A-Number -
+        # a field this bot never fills at all (no code anywhere references
+        # it). CHROME_PROFILE_DIR below is a persistent, shared profile
+        # (kept on purpose to avoid the profile-picker dialog - see its own
+        # comment), so Chrome's own form-autofill memory persists across
+        # every client run on this machine and had silently suggested/typed
+        # a stale value from some earlier session into this client's empty
+        # field - data that never came from this Sheet at all. This time it
+        # got caught because the stale value happened to fail validation;
+        # a stale value that happens to be well-formed would have gone
+        # through undetected. Disabling autofill/password-manager memory
+        # entirely removes the whole class of risk, not just this field.
+        "autofill.profile_enabled": False,
+        "autofill.credit_card_enabled": False,
+        "credentials_enable_service": False,
+        "profile.password_manager_enabled": False,
     })
     CHROME_PROFILE_DIR.mkdir(exist_ok=True)
     options.add_argument(f"--user-data-dir={CHROME_PROFILE_DIR}")
