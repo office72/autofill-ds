@@ -59,6 +59,8 @@ from selenium.common.exceptions import (
     NoSuchElementException,
     ElementClickInterceptedException,
     StaleElementReferenceException,
+    SessionNotCreatedException,
+    WebDriverException,
 )
 
 WIZARD_URL = "https://pptform.state.gov/PassportWizardMain.aspx"
@@ -1019,6 +1021,30 @@ def build_driver():
     return uc.Chrome(options=options, version_main=_detect_chrome_major_version())
 
 
+def _build_driver_with_retry(attempts: int = 3, delay_seconds: int = 10):
+    """Root-caused live 2026-09-14: "chrome not reachable" /
+    SessionNotCreatedException happening specifically on the second (or
+    later) applicant in the same run, right after the previous applicant's
+    driver.quit() had already returned - clearing stale lock files (see
+    _clear_stale_profile_locks) didn't fix this case, because nothing was
+    actually stale: chrome.exe's own OS-level shutdown after quit() isn't
+    always instant, so the very next build_driver() call can race a Chrome
+    process that's still in the middle of exiting and briefly can't be
+    connected to on the profile it's still releasing. A short wait-and-retry
+    survives that window without weakening pause_between_applicants() itself
+    (that pause is for human-like pacing on the site, not process cleanup)."""
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return build_driver()
+        except (SessionNotCreatedException, WebDriverException) as e:
+            last_error = e
+            if attempt < attempts:
+                log(f"Chrome failed to start (attempt {attempt}/{attempts}): {e}. Retrying in {delay_seconds}s...")
+                time.sleep(delay_seconds)
+    raise last_error
+
+
 def _clear_stale_profile_locks(profile_dir: Path):
     """Root-caused live 2026-09-14 ("chrome not reachable" /
     SessionNotCreatedException, no readable Python-level detail beyond that):
@@ -1082,7 +1108,7 @@ def run_one(data: dict) -> Path:
     DOWNLOAD_DIR.mkdir(exist_ok=True)
     out_path = DOWNLOAD_DIR / f"{last}_{first}_{int(time.time())}.pdf"
 
-    driver = build_driver()
+    driver = _build_driver_with_retry()
 
     try:
         driver.get(WIZARD_URL)
