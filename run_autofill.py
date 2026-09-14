@@ -42,6 +42,7 @@ import argparse
 import datetime
 import random
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -1044,7 +1045,23 @@ def _build_driver_with_retry(attempts: int = 3, delay_seconds: int = 10):
             if attempt < attempts:
                 log(f"Chrome failed to start (attempt {attempt}/{attempts}): {e}. Retrying in {delay_seconds}s...")
                 time.sleep(delay_seconds)
-    raise last_error
+
+    # Last resort, confirmed live 2026-09-14: on one real staff machine,
+    # killing orphaned processes and clearing lock files (both already tried
+    # in every attempt above, via build_driver() itself) still weren't
+    # enough - "chrome not reachable" kept happening on the very first
+    # applicant of every run. The profile directory itself had corrupted
+    # internal state (not just a stale lock) left over from some earlier
+    # crash - wiping it entirely and letting Chrome recreate it from scratch
+    # is what actually fixed it, confirmed by hand on that machine. Only
+    # reached after the lighter attempts above have already failed, so a
+    # transient/unrelated failure never pays this cost.
+    log(f"Chrome still won't start after {attempts} attempts - wiping the whole profile and trying once more.")
+    try:
+        shutil.rmtree(CHROME_PROFILE_DIR, ignore_errors=True)
+    except Exception as e:
+        log(f"Could not wipe profile directory: {e}")
+    return build_driver()
 
 
 def _kill_orphaned_chrome_processes(profile_dir: Path):
