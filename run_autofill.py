@@ -1243,6 +1243,16 @@ def run_one(data: dict) -> Path:
         raise e
     finally:
         driver.quit()
+        # Confirmed live 2026-09-14 on Contabo: Chrome can leave a visible
+        # window/background process alive even after a clean driver.quit()
+        # returns (the same behavior _detect_chrome_major_version()'s own
+        # docstring already documents - "Chrome frequently keeps a
+        # background process alive after all windows close"). Harmless on
+        # its own, but confusing to watch and no reason to leave it -
+        # reuse the same targeted, profile-scoped kill already used at
+        # launch time (never touches a real, separate Chrome window) to
+        # guarantee nothing lingers once this applicant is actually done.
+        _kill_orphaned_chrome_processes(CHROME_PROFILE_DIR)
 
     log("Done.")
     return out_path
