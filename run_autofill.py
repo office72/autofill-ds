@@ -1012,10 +1012,34 @@ def build_driver():
         "profile.password_manager_enabled": False,
     })
     CHROME_PROFILE_DIR.mkdir(exist_ok=True)
+    _clear_stale_profile_locks(CHROME_PROFILE_DIR)
     options.add_argument(f"--user-data-dir={CHROME_PROFILE_DIR}")
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
     return uc.Chrome(options=options, version_main=_detect_chrome_major_version())
+
+
+def _clear_stale_profile_locks(profile_dir: Path):
+    """Root-caused live 2026-09-14 ("chrome not reachable" /
+    SessionNotCreatedException, no readable Python-level detail beyond that):
+    this bot's whole reason for a persistent --user-data-dir (see
+    CHROME_PROFILE_DIR's own comment - avoiding the profile-picker dialog) has
+    a real cost - if a previous run's Chrome process ever died without
+    shutting down cleanly (killed window, crash, the Chrome-auto-update
+    version-mismatch crash already seen once on this exact profile), Chrome's
+    own singleton marker files are left behind in the profile directory and
+    make every future launch against that same profile fail immediately with
+    exactly this error, even though nothing is actually still running.
+    Removing these before every launch is safe: they exist only to stop two
+    Chrome processes sharing one profile at once, and build_driver() itself
+    already guarantees there's never more than one."""
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        try:
+            (profile_dir / name).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            log(f"Could not remove stale profile lock {name}: {e}")
 
 
 # Digit-string fields where Google Sheets silently mis-typing the value as a
