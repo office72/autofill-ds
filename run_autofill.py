@@ -42,6 +42,7 @@ import argparse
 import datetime
 import random
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -1014,6 +1015,7 @@ def build_driver():
         "profile.password_manager_enabled": False,
     })
     CHROME_PROFILE_DIR.mkdir(exist_ok=True)
+    _kill_orphaned_chrome_processes(CHROME_PROFILE_DIR)
     _clear_stale_profile_locks(CHROME_PROFILE_DIR)
     options.add_argument(f"--user-data-dir={CHROME_PROFILE_DIR}")
     options.add_argument("--no-first-run")
@@ -1043,6 +1045,29 @@ def _build_driver_with_retry(attempts: int = 3, delay_seconds: int = 10):
                 log(f"Chrome failed to start (attempt {attempt}/{attempts}): {e}. Retrying in {delay_seconds}s...")
                 time.sleep(delay_seconds)
     raise last_error
+
+
+def _kill_orphaned_chrome_processes(profile_dir: Path):
+    """Root-caused live 2026-09-14: "chrome not reachable" happening on the
+    very FIRST applicant of a run - not a same-run race between two
+    launches (that would be _build_driver_with_retry's case) and not
+    something a fresh lock file alone explains either. The remaining real
+    cause: a chrome.exe/chromedriver.exe process from a PAST run (crashed,
+    killed window, machine never fully cleaned up after) is still alive and
+    still actually holding this bot's dedicated profile - deleting lock
+    files does nothing if the process that owns them never died. Only
+    targets processes whose command line references this bot's own
+    CHROME_PROFILE_DIR (never a staff member's separate, regular Chrome
+    window - that one never has this --user-data-dir in its command line)."""
+    script = (
+        "Get-CimInstance Win32_Process | "
+        f"Where-Object {{ $_.Name -match '^chrome' -and $_.CommandLine -like '*{profile_dir}*' }} | "
+        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+    )
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-Command", script], timeout=15, capture_output=True)
+    except Exception as e:
+        log(f"Could not check for orphaned Chrome processes: {e}")
 
 
 def _clear_stale_profile_locks(profile_dir: Path):
