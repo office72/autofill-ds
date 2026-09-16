@@ -109,6 +109,11 @@ SECTIONS = [
     ]),
     ("DATA CORRECTION / DS-11 TRIGGER", "FFF2CC", [
         ("Data Printed Correctly?", "YES_NO", "DYN"),  # only if scenario != First-time
+        # Third step-6 question, found live 2026-09-16 on the limited-validity
+        # branch: "Has your data changed since your most recent document was
+        # issued?" - required there, and the bot stalls silently without it.
+        # Blank is read as No.
+        ("Data Changed Since Issue?", "YES_NO", "DYN"),  # only if scenario != First-time
         ("Incorrect Fields", None, "DYN"),  # only if Data Printed Correctly = No
         ("Name Changed?", "YES_NO", "DYN"),  # only if scenario != First-time
         ("Name Change Type", "NAME_CHANGE_TYPE", "DYN"),  # only if Name Changed = Yes

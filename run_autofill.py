@@ -206,12 +206,48 @@ def _collect_visible_validation_errors(driver) -> list:
 
 
 def find(driver, selector, condition=EC.presence_of_element_located, timeout=DEFAULT_WAIT):
+    """Waits for one element. A plain Selenium timeout here carries an EMPTY
+    message plus a native stacktrace - the same opaque "Message:" that has
+    now shown up in several real failure reports (2026-08-12, 2026-09-15) -
+    so the selector it gave up on is attached to the error instead."""
     locator = (By.CSS_SELECTOR, selector)
     try:
         return WebDriverWait(driver, timeout).until(condition(locator))
     except UnexpectedAlertPresentException:
         _accept_stray_alert(driver)
-        return WebDriverWait(driver, timeout).until(condition(locator))
+        try:
+            return WebDriverWait(driver, timeout).until(condition(locator))
+        except SeleniumTimeout:
+            raise SeleniumTimeout(_timeout_message(driver, selector, condition)) from None
+    except SeleniumTimeout:
+        raise SeleniumTimeout(_timeout_message(driver, selector, condition)) from None
+
+
+def _timeout_message(driver, selector: str, condition) -> str:
+    """Says which element was waited for, whether it exists at all, and any
+    validation message the page is showing - i.e. what a person looking at
+    the screen would have seen."""
+    want = getattr(condition, "__name__", str(condition))
+    try:
+        els = driver.find_elements(By.CSS_SELECTOR, selector)
+        if not els:
+            state = "not in the page at all"
+        elif not els[0].is_displayed():
+            state = "present but hidden"
+        elif not els[0].is_enabled():
+            state = "present but disabled"
+        else:
+            state = "present and visible, but never became clickable (something is covering it?)"
+    except Exception:
+        state = "could not be inspected"
+    msg = f"Timed out waiting for {selector} ({want}) - {state}."
+    try:
+        errors = _collect_visible_validation_errors(driver)
+        if errors:
+            msg += " The page is showing: " + " | ".join(errors[:5])
+    except Exception:
+        pass
+    return msg
 
 
 def count(driver, selector):
@@ -225,6 +261,75 @@ def is_visible(driver, selector) -> bool:
     something invisible. Check actual visibility, not just DOM presence."""
     els = driver.find_elements(By.CSS_SELECTOR, selector)
     return bool(els) and els[0].is_displayed()
+
+
+def wait_visible(driver, selector, timeout=DEFAULT_WAIT) -> bool:
+    """Waits for an AJAX-revealed sub-question to actually become visible.
+
+    Real failure this fixes (2026-09-15): answering "Was your most recent
+    passport book limited for two years or less?" = Yes triggers a postback
+    that adds the follow-up "Did you pay for a card the last time you
+    applied?". The old code tested count() for that follow-up immediately
+    after check(), i.e. within one pause_between_fields() - when the
+    postback was slower than that, the follow-up was silently skipped and
+    the wizard went on with a REQUIRED question unanswered, which is what
+    put a child's limited-validity run on the wrong (DS-11) track and broke
+    its Fees page. Timing-dependent, so it looked random."""
+    try:
+        WebDriverWait(driver, timeout).until(
+            EC.visibility_of_element_located((By.CSS_SELECTOR, selector))
+        )
+        return True
+    except SeleniumTimeout:
+        return False
+    except UnexpectedAlertPresentException:
+        _accept_stray_alert(driver)
+        return is_visible(driver, selector)
+
+
+def unanswered_visible_radio_groups(driver, radio_selector: str) -> list:
+    """Names of radio-button groups matching the selector that are visible
+    but have nothing selected. Last guard before leaving a step: an
+    unanswered required radio on this wizard raises nothing at all - Next
+    silently does nothing and the run keeps filling pages it is no longer
+    on (exactly what happened on 2026-09-16, see step 6's third question)."""
+    script = """
+    const groups = {};
+    document.querySelectorAll(arguments[0]).forEach(el => {
+      if (!el.offsetParent) return;           // not visible
+      if (!(el.name in groups)) groups[el.name] = false;
+      if (el.checked) groups[el.name] = true;
+    });
+    return Object.keys(groups).filter(n => !groups[n]);
+    """
+    try:
+        return driver.execute_script(script, radio_selector) or []
+    except Exception:
+        return []
+
+
+def check_and_confirm(driver, selector, attempts=3):
+    """check() that verifies the radio actually STAYED selected.
+
+    Every answer in step 6 fires an ASP.NET postback that re-renders the
+    whole panel, and a click landing while a previous postback is still in
+    flight is thrown away with the old markup - the radio looks clicked for
+    a moment and comes back empty. Confirmed live 2026-09-16: 'Did you pay
+    for a card?' was answered and still ended up unselected, which kept the
+    wizard stuck on step 6."""
+    for attempt in range(attempts):
+        check(driver, selector)
+        pause_between_fields()
+        try:
+            if find(driver, selector).is_selected():
+                return
+        except Exception:
+            pass
+        log(f"  {selector} did not stay selected (postback re-render) - retry {attempt + 1}/{attempts}")
+    raise SeleniumTimeout(
+        f"{selector} would not stay selected after {attempts} attempts - the site kept "
+        f"re-rendering the panel. Check the debug screenshot."
+    )
 
 
 def check_for_block(driver, context: str = ""):
@@ -704,10 +809,39 @@ def step_most_recent_passport_continued_if_present(driver, d):
     # issued within the last 2 years (site-computed; not always present).
     if count(driver, p + "LimitedIssueBook_0") > 0:
         limited = d.get("Limited Validity Under 2 Years?")
-        check(driver, p + "LimitedIssueBook_0" if is_yes(limited) else p + "LimitedIssueBook_1")
-        if is_yes(limited) and count(driver, p + "paidForCard_0") > 0:
-            paid = d.get("Paid For Card Before?")
-            check(driver, p + "paidForCard_0" if is_yes(paid) else p + "paidForCard_1")
+        check_and_confirm(driver, p + "LimitedIssueBook_0" if is_yes(limited) else p + "LimitedIssueBook_1")
+        if is_yes(limited):
+            # The follow-ups arrive via postback - wait for them instead of
+            # testing for them immediately (see wait_visible's docstring).
+            if wait_visible(driver, p + "paidForCard_0"):
+                paid = d.get("Paid For Card Before?")
+                check_and_confirm(driver, p + "paidForCard_0" if is_yes(paid) else p + "paidForCard_1")
+            else:
+                log("WARNING: 'Did you pay for a card?' never appeared after answering "
+                    "Limited Validity = Yes - continuing, but check the result")
+
+    # Third sub-question, found live 2026-09-16 and NOT in notes.md's
+    # original step-6 map: "Has your data changed since your most recent
+    # document was issued?" (name/date of birth/sex changed since the book
+    # was issued). It only shows up in some branches - a limited-validity
+    # replacement is one - and it is required, so missing it stalls the
+    # wizard silently. Defaults to No: an applicant whose details changed
+    # answers the existing "Name Changed?"/"Data Printed Correctly?"
+    # questions, and the sheet column is optional for older copies.
+    if is_visible(driver, p + "DataChangedYesNoButtons_0"):
+        changed = d.get("Data Changed Since Issue?")
+        check_and_confirm(driver, p + "DataChangedYesNoButtons_0" if is_yes(changed)
+                          else p + "DataChangedYesNoButtons_1")
+
+    unanswered = unanswered_visible_radio_groups(
+        driver, 'input[type=radio][id^="PassportWizard_mostRecentPassportContinued_"]')
+    if unanswered:
+        raise SeleniumTimeout(
+            "Step 6 (Most Recent Passport Continued) still has unanswered required question(s): "
+            + ", ".join(unanswered)
+            + ". The site would refuse to advance and the run would silently fill the wrong pages. "
+              "This usually means the site added a question we do not map yet - see the debug HTML."
+        )
 
     click_next(driver)
 
@@ -813,13 +947,52 @@ def step_review(driver, d):
     click_next(driver)
 
 
+def _log_fees_page(driver):
+    """The Fees page is our sanity check on everything answered before it
+    (notes.md: a wrong date of birth or issue date shows up as a wrong
+    price), so the totals go into the run log verbatim.
+
+    NOT a failure condition, even when a line is negative: confirmed with
+    the user 2026-09-16 that a limited-validity replacement for a minor
+    legitimately shows "Payable to acceptance facility $35.00" together
+    with "Total Payable to Department of State -$35.00" - the credit for
+    "I did not pay for a card last time" cancelling the execution fee, for
+    a real total of $0.00. An earlier version of this function treated that
+    as the site's bug and would have blocked a perfectly good run."""
+    try:
+        text = driver.find_element(By.TAG_NAME, "body").text
+    except Exception:
+        return
+    lines = [l.strip() for l in text.splitlines() if "Total" in l or "Payable" in l or "$" in l]
+    flat = " | ".join(lines[-8:])
+    if flat:
+        log(f"Fees page totals: {flat}")
+
+
+def check_first_present(driver, selectors, label: str):
+    """Some Fees-page controls exist under two different ids depending on
+    which products the case qualifies for - e.g. Routine Service is
+    `routineService` on one variant and `bookRoutineService` on the
+    limited-validity/book-only variant (found live 2026-09-16). Pick
+    whichever one this page actually has."""
+    for selector in selectors:
+        if is_visible(driver, selector):
+            check(driver, selector)
+            return selector
+    raise SeleniumTimeout(
+        f"None of the {label} options exist on this Fees page: {', '.join(selectors)}. "
+        f"The site may have renamed them - see the debug HTML."
+    )
+
+
 def step_fees(driver, d):
     log("Step 9: Fees (business rule: Book / Routine / Standard, always)")
     p = "#PassportWizard_feesStep_"
-    check(driver, p + "bookFee")
+    _log_fees_page(driver)
+    check_first_present(driver, [p + "bookFee"], "passport book")
     # bookType52 (Large Book) intentionally left unchecked - business rule
-    check(driver, p + "routineService")
-    check(driver, p + "bookPriorityMail")  # Standard Delivery
+    check_first_present(driver, [p + "routineService", p + "bookRoutineService"], "routine service")
+    check_first_present(driver, [p + "bookPriorityMail", p + "priorityMail"], "standard delivery")
 
     click_finish(driver)
 

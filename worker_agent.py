@@ -53,6 +53,21 @@ STALE_JOB_TIMEOUT_MINUTES = 45
 
 COLUMNS = ["job_id", "sheet_id", "status", "requested_at", "started_at", "finished_at", "error"]
 
+# A failed run is retried automatically, but only when the failure looks
+# transient (anti-bot block, a slow postback, a browser/session crash). A
+# failure caused by the applicant's own data in the Sheet, or by the
+# government site refusing the answers themselves, would fail again exactly
+# the same way, so retrying it just burns runs against a site that already
+# rate-limits us. Retry markers are matched against the Notes text the bot
+# itself wrote into the applicant's column.
+RETRY_DELAY_SECONDS = 300
+MAX_ATTEMPTS = 2
+NO_RETRY_NOTE_MARKERS = (
+    "error on the following field",   # FieldValidationError - the site rejected a value
+    "negative number",                # _validate_applicant_data - broken Sheet cell
+    "is not implemented",             # unsupported Passport Scenario
+)
+
 WORKERS_SHEET_NAME = "Workers"
 WORKER_COLUMNS = ["worker_id", "last_seen", "status", "current_job_id"]
 # Hostname, not something hand-configured per machine - Contabo and this
@@ -108,6 +123,58 @@ def _reclaim_stale_jobs(sheets):
             )
 
 
+def _retryable_failed_columns(spreadsheet_id: str) -> list:
+    """Applicant columns whose Status is Error and whose Notes do NOT look
+    like a data problem - i.e. the ones worth running again in a few
+    minutes. Requested by the user (2026-09-15) after a Cloudflare block hit
+    the very last step (the PDF download) of an otherwise perfect run: an
+    immediate manual re-run went through, so the work was lost for no reason
+    other than timing."""
+    import sheets_backend  # imported lazily: launcher fetches it fresh per run
+
+    applicants = sheets_backend.load_all_applicants(spreadsheet_id)
+    retryable = []
+    for column, data in applicants.items():
+        if str(data.get(sheets_backend.STATUS_ROW_LABEL) or "").strip() != "Error":
+            continue
+        note = str(data.get(sheets_backend.NOTES_ROW_LABEL) or "").lower()
+        if any(marker.lower() in note for marker in NO_RETRY_NOTE_MARKERS):
+            print(f"[worker_agent] Column {column} failed on a data/answer problem - not retrying.")
+            continue
+        retryable.append(column)
+    return retryable
+
+
+def _run_with_retries(sheets, row_number: int, job: dict) -> tuple:
+    """Runs the job, then re-runs just the applicants that failed for a
+    transient reason, after a pause. Returns (status, error_text)."""
+    import sheets_backend
+
+    exit_code = launcher.run_with_sheet(job["sheet_id"])
+    if exit_code == 0:
+        return "done", ""
+
+    attempt = 1
+    error = f"exit code {exit_code}"
+    while attempt < MAX_ATTEMPTS:
+        columns = _retryable_failed_columns(job["sheet_id"])
+        if not columns:
+            return "error", error
+        print(f"[worker_agent] Retrying {', '.join(columns)} in {RETRY_DELAY_SECONDS}s "
+              f"(attempt {attempt + 1}/{MAX_ATTEMPTS}).")
+        _update_row(sheets, row_number, {"error": f"{error} - retrying {','.join(columns)} in "
+                                                  f"{RETRY_DELAY_SECONDS // 60}m"})
+        time.sleep(RETRY_DELAY_SECONDS)
+        for column in columns:
+            sheets_backend.set_status(job["sheet_id"], column, sheets_backend.READY_STATUS, "")
+        exit_code = launcher.run_with_sheet(job["sheet_id"])
+        attempt += 1
+        if exit_code == 0:
+            return "done", f"succeeded on attempt {attempt}"
+        error = f"exit code {exit_code} (attempt {attempt})"
+    return "error", error
+
+
 def _heartbeat(sheets, status: str, current_job_id: str = ""):
     """Writes/updates this machine's own row in the Workers tab - "I'm alive,
     here's what I'm doing right now." A control panel reads this tab to show
@@ -160,14 +227,11 @@ def main_loop():
                 _update_row(sheets, row_number, {"status": "running", "started_at": _now()})
                 _heartbeat(sheets, "busy", job["job_id"])
                 try:
-                    exit_code = launcher.run_with_sheet(job["sheet_id"])
-                    if exit_code == 0:
-                        _update_row(sheets, row_number, {"status": "done", "finished_at": _now()})
-                    else:
-                        _update_row(
-                            sheets, row_number,
-                            {"status": "error", "finished_at": _now(), "error": f"exit code {exit_code}"},
-                        )
+                    status, error = _run_with_retries(sheets, row_number, job)
+                    _update_row(
+                        sheets, row_number,
+                        {"status": status, "finished_at": _now(), "error": error},
+                    )
                 except Exception as e:
                     _update_row(sheets, row_number, {"status": "error", "finished_at": _now(), "error": str(e)[:500]})
                 print(f"[worker_agent] Job '{job['job_id']}' finished.")

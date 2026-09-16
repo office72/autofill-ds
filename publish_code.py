@@ -15,7 +15,11 @@ SERVICE_ACCOUNT_FILE = r"C:\Users\office_americandocs\document-analyzer\service_
 CODE_FOLDER_ID = "1A1w0epVQmT9C1mBIe_F1-8PuJDtWIyG4"
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 
-FILES_TO_PUBLISH = ["run_autofill.py", "sheets_backend.py"]
+# worker_agent.py is published too, but ONLY as a download for the worker
+# machines (Contabo) - launcher.py does not fetch it per run the way the two
+# above are fetched, because the agent is the process doing the fetching.
+# Updating it means downloading it on the machine and restarting the agent.
+FILES_TO_PUBLISH = ["run_autofill.py", "sheets_backend.py", "worker_agent.py"]
 
 
 def publish():
