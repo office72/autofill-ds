@@ -339,7 +339,10 @@ def build_template():
         (["State of Birth (USA only)"], f'REGEXMATCH(UPPER({country_of_birth_cell}),"USA|UNITED STATES|U\\.S\\.A")'),
         (["Reported Lost or Stolen?"], lost_stolen_scenario),
         (["Limited Validity Under 2 Years?", "Name On Book - First", "Name On Book - Last", "Book Number",
-          "Data Printed Correctly?", "Name Changed?"], not_first_time),
+          "Data Printed Correctly?", "Name Changed?",
+          # Third step-6 question on the site, mapped 2026-09-16 - required
+          # there exactly like the two next to it (see notes.md).
+          "Data Changed Since Issue?"], not_first_time),
         (["Paid For Card Before?"], f'{limited_validity_cell}="Yes"'),
         (["Incorrect Fields"], f'{data_correct_cell}="No"'),
         (["Name Change Type", "Name Change Place", "Name Change Date", "Name Change Certified Docs?"],
