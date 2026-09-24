@@ -123,6 +123,27 @@ def _reclaim_stale_jobs(sheets):
             )
 
 
+def _load_sheets_backend():
+    """sheets_backend.py is NOT part of the installed shell on a worker
+    machine - launcher.fetch_latest_code() downloads it from Drive into
+    bot_runtime/ on every run, and run_autofill.py imports it there as a
+    subprocess whose cwd is that directory. This process has no such cwd, so
+    importing it by name fails with ModuleNotFoundError on every machine
+    except a dev box that happens to have a copy of the repo.
+
+    That is exactly what broke every Contabo job from 2026-09-22 on: the
+    import sat at the top of _run_with_retries(), so it raised one second
+    after the job was claimed - before the browser was ever launched - and
+    the queue recorded "No module named 'sheets_backend'" instead of running
+    the job at all.
+    """
+    runtime_dir = str(launcher.RUNTIME_DIR)
+    if runtime_dir not in sys.path:
+        sys.path.append(runtime_dir)
+    import sheets_backend
+    return sheets_backend
+
+
 def _retryable_failed_columns(spreadsheet_id: str) -> list:
     """Applicant columns whose Status is Error and whose Notes do NOT look
     like a data problem - i.e. the ones worth running again in a few
@@ -130,7 +151,7 @@ def _retryable_failed_columns(spreadsheet_id: str) -> list:
     the very last step (the PDF download) of an otherwise perfect run: an
     immediate manual re-run went through, so the work was lost for no reason
     other than timing."""
-    import sheets_backend  # imported lazily: launcher fetches it fresh per run
+    sheets_backend = _load_sheets_backend()
 
     applicants = sheets_backend.load_all_applicants(spreadsheet_id)
     retryable = []
@@ -147,9 +168,11 @@ def _retryable_failed_columns(spreadsheet_id: str) -> list:
 
 def _run_with_retries(sheets, row_number: int, job: dict) -> tuple:
     """Runs the job, then re-runs just the applicants that failed for a
-    transient reason, after a pause. Returns (status, error_text)."""
-    import sheets_backend
+    transient reason, after a pause. Returns (status, error_text).
 
+    Nothing in the retry machinery may run before the job itself: a retry is
+    an extra, and a broken extra must never cost us the run.
+    """
     exit_code = launcher.run_with_sheet(job["sheet_id"])
     if exit_code == 0:
         return "done", ""
@@ -157,7 +180,15 @@ def _run_with_retries(sheets, row_number: int, job: dict) -> tuple:
     attempt = 1
     error = f"exit code {exit_code}"
     while attempt < MAX_ATTEMPTS:
-        columns = _retryable_failed_columns(job["sheet_id"])
+        # Deciding whether to retry must not be able to replace the real
+        # failure with its own - that is how the original error got lost.
+        try:
+            columns = _retryable_failed_columns(job["sheet_id"])
+            sheets_backend = _load_sheets_backend()
+        except Exception as e:
+            print(f"[worker_agent] Could not check for retryable columns: {e}")
+            traceback.print_exc()
+            return "error", f"{error} (retry check failed: {str(e)[:200]})"
         if not columns:
             return "error", error
         print(f"[worker_agent] Retrying {', '.join(columns)} in {RETRY_DELAY_SECONDS}s "
