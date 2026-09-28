@@ -148,6 +148,15 @@ def is_yes(value) -> bool:
     return str(value).strip().lower() == "yes"
 
 
+def is_yes_or_blank(value) -> bool:
+    """For a question whose safe answer is Yes. Only "Data Printed Correctly?"
+    uses it: an empty cell there used to be read as "No, the data was printed
+    incorrectly", which opens the site's Incorrect-Fields panel with nothing to
+    put in it and prints a DS-5504 instead of a DS-82 - silently, since a blank
+    cell looks like "nothing to say" to whoever filled the sheet."""
+    return str(value or "").strip() == "" or is_yes(value)
+
+
 def country_is_usa(country: str) -> bool:
     if not country:
         return False
@@ -771,7 +780,11 @@ def step_most_recent_passport_continued_if_present(driver, d):
     # NOTE: site's own ids are misleading - "dataIncorrectBook" is the "Yes,
     # incorrect" choice and "dataIncorrectNone" is "No, printed correctly".
     if has_data_incorrect_q:
-        if is_yes(d.get("Data Printed Correctly?")):
+        # Blank means "printed correctly": nobody leaves this cell empty in
+        # order to claim the State Department misprinted their passport.
+        # An explicit "No" is still honoured - that is how a real correction
+        # (and its DS-5504) gets requested, from the sheet or from FormBridge.
+        if is_yes_or_blank(d.get("Data Printed Correctly?")):
             check(driver, p + "dataIncorrectNone")
         else:
             check(driver, p + "dataIncorrectBook")
