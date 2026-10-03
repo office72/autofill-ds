@@ -37,7 +37,16 @@ CODE_FOLDER_ID = "1A1w0epVQmT9C1mBIe_F1-8PuJDtWIyG4"
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 
 RUNTIME_DIR = BASE_DIR / "bot_runtime"
-FILES_TO_FETCH = ["run_autofill.py", "sheets_backend.py"]
+# api_backend.py joined the list on 2026-10-03: run_autofill now picks its
+# data backend per job, and a job that arrives as a FormBridge case token
+# needs this module present. A machine that never runs platform jobs fetches
+# it and ignores it.
+#
+# NOTE: this is a change to the thin shell, which means copying launcher.py
+# once to any machine that will run platform jobs (Contabo). The existing
+# sheet-driven flow keeps working on machines that were not updated - they
+# simply never receive a case token.
+FILES_TO_FETCH = ["run_autofill.py", "sheets_backend.py", "api_backend.py"]
 
 
 def fetch_latest_code():

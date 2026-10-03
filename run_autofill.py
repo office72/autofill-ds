@@ -48,7 +48,23 @@ import sys
 import time
 from pathlib import Path
 
+import api_backend
 import sheets_backend
+
+# Which module answers the six data calls. Google Sheets unless the job
+# arrived as a FormBridge case token - see api_backend.py. Resolved once per
+# run and never half way through, so one run cannot read from one place and
+# report to another.
+backend = sheets_backend
+
+
+def _select_backend(handle: str):
+    """Returns the module that owns this handle. A plain spreadsheet id or URL
+    keeps the original path, byte for byte: this cannot change the behaviour of
+    the flow that is in production today."""
+    global backend
+    backend = api_backend if api_backend.is_case_handle(handle) else sheets_backend
+    return backend
 import undetected_chromedriver as uc
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -1450,14 +1466,15 @@ def run_all(spreadsheet_id: str, only_column: str = None):
     applicant is recorded (Status=Error + a Notes summary) and does NOT abort
     the rest of the queue. --column overrides the queue with a single column,
     regardless of its Status, for manual testing."""
+    _select_backend(spreadsheet_id)
     if only_column:
-        applicants = sheets_backend.load_all_applicants(spreadsheet_id)
+        applicants = backend.load_all_applicants(spreadsheet_id)
         if only_column not in applicants:
             log(f"Column {only_column} not found in this sheet.")
             return
         targets = [only_column]
     else:
-        targets = sheets_backend.ready_columns(spreadsheet_id)
+        targets = backend.ready_columns(spreadsheet_id)
         if not targets:
             log("No applicants marked 'Ready' - nothing to do.")
             return
@@ -1466,11 +1483,11 @@ def run_all(spreadsheet_id: str, only_column: str = None):
     for i, column_letter in enumerate(targets):
         if i > 0:
             pause_between_applicants()
-        data = sheets_backend.load_all_applicants(spreadsheet_id)[column_letter]
+        data = backend.load_all_applicants(spreadsheet_id)[column_letter]
         first = data.get("First Name") or "unknown"
         last = data.get("Last Name") or "unknown"
         log(f"--- Applicant {column_letter}: {first} {last} ---")
-        sheets_backend.set_status(spreadsheet_id, column_letter, sheets_backend.RUNNING_STATUS)
+        backend.set_status(spreadsheet_id, column_letter, backend.RUNNING_STATUS)
 
         try:
             out_path = run_one(data)
@@ -1481,25 +1498,25 @@ def run_all(spreadsheet_id: str, only_column: str = None):
             if debug_artifacts:
                 fail_label = f"{last}_{first}_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}-FAILED"
                 try:
-                    debug_link = sheets_backend.upload_debug_artifacts(spreadsheet_id, debug_artifacts, fail_label)
+                    debug_link = backend.upload_debug_artifacts(spreadsheet_id, debug_artifacts, fail_label)
                     note = f"{note}\n\nScreenshot/HTML: {debug_link}"
                 except Exception as upload_err:
                     log(f"  (couldn't upload debug artifacts: {upload_err})")
-            sheets_backend.set_status(spreadsheet_id, column_letter, sheets_backend.ERROR_STATUS, note=note)
+            backend.set_status(spreadsheet_id, column_letter, backend.ERROR_STATUS, note=note)
             continue
 
         run_label = f"{last}_{first}_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
         try:
-            link = sheets_backend.upload_run_output(spreadsheet_id, out_path, run_label)
+            link = backend.upload_run_output(spreadsheet_id, out_path, run_label)
         except Exception as e:
             log(f"Applicant {column_letter}: PDF created locally but Drive upload failed: {e}")
-            sheets_backend.set_status(
-                spreadsheet_id, column_letter, sheets_backend.ERROR_STATUS,
+            backend.set_status(
+                spreadsheet_id, column_letter, backend.ERROR_STATUS,
                 note=f"PDF generated locally ({out_path}) but Drive upload failed: {e}"[:400],
             )
             continue
 
-        sheets_backend.set_status(spreadsheet_id, column_letter, sheets_backend.DONE_STATUS, note=link)
+        backend.set_status(spreadsheet_id, column_letter, backend.DONE_STATUS, note=link)
         log(f"Applicant {column_letter} done: {link}")
 
 
@@ -1511,5 +1528,5 @@ if __name__ == "__main__":
                               "Omit to process all Status=Ready columns.")
     args = parser.parse_args()
 
-    spreadsheet_id = sheets_backend.resolve_to_spreadsheet_id(args.sheet)
+    spreadsheet_id = _select_backend(args.sheet).resolve_to_spreadsheet_id(args.sheet)
     run_all(spreadsheet_id, only_column=args.column)
