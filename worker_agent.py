@@ -29,6 +29,7 @@ Usage:
 Stop with Ctrl+C. Runs forever, checking the queue on an interval.
 """
 
+import os
 import socket
 import sys
 import time
@@ -140,6 +141,11 @@ def _load_sheets_backend():
     runtime_dir = str(launcher.RUNTIME_DIR)
     if runtime_dir not in sys.path:
         sys.path.append(runtime_dir)
+    # launcher.py hands this to the bot subprocess but not to this process,
+    # and sheets_backend resolves its credentials at import time - so without
+    # it the retry check fails on a machine where the file is sitting right
+    # there next to the launcher.
+    os.environ.setdefault("AUTOFILL_SERVICE_ACCOUNT", launcher.SERVICE_ACCOUNT_FILE)
     import sheets_backend
     return sheets_backend
 

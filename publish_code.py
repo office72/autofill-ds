@@ -19,11 +19,24 @@ SCOPES = ["https://www.googleapis.com/auth/drive"]
 # machines (Contabo) - launcher.py does not fetch it per run the way the two
 # above are fetched, because the agent is the process doing the fetching.
 # Updating it means downloading it on the machine and restarting the agent.
+# launcher.py is published for the same reason worker_agent.py is: not fetched
+# per run (it *is* the thing that fetches), but downloadable from the Drive
+# folder on a worker machine, which beats copying a file over RDP.
 FILES_TO_PUBLISH = ["run_autofill.py", "sheets_backend.py", "api_backend.py",
-                    "worker_agent.py"]
+                    "worker_agent.py", "launcher.py"]
 
 
 def publish():
+    # A publish reaches every machine's next run, so check first that the
+    # oldest launcher in the field can still load what we are about to send.
+    # See check_before_publish.py for the run this exists because of.
+    import check_before_publish
+    problems = check_before_publish.check()
+    if problems:
+        for problem in problems:
+            print(f"REFUSING TO PUBLISH: {problem}")
+        raise SystemExit(1)
+
     creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
     drive = build("drive", "v3", credentials=creds)
 

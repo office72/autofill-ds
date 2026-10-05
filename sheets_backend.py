@@ -59,6 +59,22 @@ def extract_spreadsheet_id(url_or_id: str) -> str:
 
 
 def _credentials():
+    # Checked here rather than at import, with the path named, because the last
+    # resort above is this developer's own machine - on any other computer a
+    # missing service_account.json used to surface as a bare
+    # "[Errno 2] No such file or directory" from deep inside the Google
+    # library, with nothing to say which file or why. That cost a real run:
+    # six queued jobs on a live client (גלי גבר, 2026-10-04/05) failed with
+    # that errno, before the bot could even write Status=Running, and the
+    # cause - the file simply not being in the bot folder on that machine -
+    # was invisible from the queue, the sheet and the Drive folder alike.
+    if not Path(SERVICE_ACCOUNT_FILE).exists():
+        raise RuntimeError(
+            "service_account.json not found. Looked at: "
+            f"AUTOFILL_SERVICE_ACCOUNT={os.environ.get('AUTOFILL_SERVICE_ACCOUNT') or '(unset)'}, "
+            f"next to this file ({Path(__file__).parent / 'service_account.json'}), "
+            f"and the fallback {SERVICE_ACCOUNT_FILE}. "
+            "On a worker machine the file belongs next to launcher.py.")
     return service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
 
 

@@ -48,8 +48,18 @@ import sys
 import time
 from pathlib import Path
 
-import api_backend
 import sheets_backend
+
+# A machine whose launcher.py predates 2026-10-03 fetches only run_autofill.py
+# and sheets_backend.py, so api_backend.py is simply not there. A bare import
+# would make this module fail to load at all - the bot would exit 1 before it
+# could write Status=Running, with nothing in the sheet and nothing in the
+# Drive folder to say why. That must never be the cost of a feature no such
+# machine uses.
+try:
+    import api_backend
+except ModuleNotFoundError:
+    api_backend = None
 
 # Which module answers the six data calls. Google Sheets unless the job
 # arrived as a FormBridge case token - see api_backend.py. Resolved once per
@@ -63,7 +73,14 @@ def _select_backend(handle: str):
     keeps the original path, byte for byte: this cannot change the behaviour of
     the flow that is in production today."""
     global backend
-    backend = api_backend if api_backend.is_case_handle(handle) else sheets_backend
+    if api_backend is not None and api_backend.is_case_handle(handle):
+        backend = api_backend
+    else:
+        backend = sheets_backend
+        if api_backend is None and str(handle or "").startswith("case:"):
+            raise RuntimeError(
+                "This job is a FormBridge case, but api_backend.py was not fetched. "
+                "Copy the current launcher.py to this machine (it fetches it).")
     return backend
 import undetected_chromedriver as uc
 from selenium import webdriver
