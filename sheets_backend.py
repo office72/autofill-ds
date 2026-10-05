@@ -37,6 +37,12 @@ SERVICE_ACCOUNT_FILE = _find_service_account_file()
 SCOPES = ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/spreadsheets"]
 
 APPLICANTS_SHEET_NAME = "Applicants"
+
+# The shared job queue, which is also where blocks are counted. One tab, one
+# row per block, so "are we being blocked more than we used to be?" is a
+# question with an answer instead of a memory of the last bad day.
+QUEUE_SPREADSHEET_ID = "11Aj96yzN8TZpDJ92flJju3Bp4lyvKhrU4EeSBwgHZjo"
+BLOCKS_SHEET_NAME = "Blocks"
 READY_STATUS = "Ready"
 RUNNING_STATUS = "Running"
 DONE_STATUS = "Done"
@@ -50,6 +56,27 @@ _FOLDER_ID_RE = re.compile(r"/folders/([a-zA-Z0-9_-]+)")
 
 SPREADSHEET_MIME = "application/vnd.google-apps.spreadsheet"
 FOLDER_MIME = "application/vnd.google-apps.folder"
+
+
+def record_block(machine: str, context: str, detail: str, spreadsheet_id: str = ""):
+    """Appends one row to the Blocks tab: when, which machine, where in the
+    run, and what was seen.
+
+    Never raises. This is called while a run is already failing, and losing
+    the record is better than replacing a clear BotBlockedError with an error
+    about recording it. If the tab does not exist yet, the append creates
+    nothing and the failure is swallowed - create a "Blocks" tab once and rows
+    start arriving.
+    """
+    try:
+        row = [[datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+                machine, context, str(detail)[:500], spreadsheet_id]]
+        get_sheets_service().spreadsheets().values().append(
+            spreadsheetId=QUEUE_SPREADSHEET_ID, range=f"{BLOCKS_SHEET_NAME}!A:E",
+            valueInputOption="RAW", insertDataOption="INSERT_ROWS", body={"values": row},
+        ).execute()
+    except Exception:
+        pass
 
 
 def extract_spreadsheet_id(url_or_id: str) -> str:

@@ -48,6 +48,8 @@ import sys
 import time
 from pathlib import Path
 
+import socket
+
 import sheets_backend
 
 # A machine whose launcher.py predates 2026-10-03 fetches only run_autofill.py
@@ -374,6 +376,21 @@ def check_and_confirm(driver, selector, attempts=3):
     )
 
 
+def _record_block(context: str, detail: str):
+    """Counts this block somewhere a human can look later.
+
+    Two blocks in one morning (2026-10-05, Cloudflare "Just a moment..." on
+    the Contabo IP) were only found by reading debug HTML out of a client's
+    Drive folder by hand. Whether to pay for proxies or add machines with
+    their own addresses is a question about *how often* this happens, and
+    nothing was counting.
+    """
+    try:
+        backend.record_block(socket.gethostname(), context, detail)
+    except Exception:
+        pass   # a run already failing must not fail differently because of this
+
+
 def check_for_block(driver, context: str = ""):
     """Looks for known anti-bot interstitial/block signatures on the current
     page and raises BotBlockedError if found, instead of letting the run fall
@@ -385,11 +402,13 @@ def check_for_block(driver, context: str = ""):
         title = (driver.title or "").lower()
     for sig in BLOCK_TITLE_SIGNATURES:
         if sig in title:
+            _record_block(context, f"title {driver.title!r}")
             raise BotBlockedError(f"[{context}] page title looks like a block/challenge page: {driver.title!r}")
 
     body = driver.page_source.lower()
     for sig in BLOCK_BODY_SIGNATURES:
         if sig in body:
+            _record_block(context, f"body signature {sig!r}")
             raise BotBlockedError(f"[{context}] page body contains block signature {sig!r}")
 
 
@@ -1031,9 +1050,40 @@ def check_first_present(driver, selectors, label: str):
     )
 
 
+FEE_PAGE_MARKERS = ("#PassportWizard_feesStep_bookFee",
+                    "#PassportWizard_feesStep_routineService",
+                    "#PassportWizard_feesStep_bookRoutineService")
+
+
+def _ensure_on_fees_page(driver, attempts: int = 3):
+    """Makes sure the wizard actually got to Fees before looking for fee
+    options on it.
+
+    Found live 2026-10-05 on a real client: Next was clicked on the Review
+    page, the page did not advance - the site does this silently - and the bot
+    then searched for fee controls on what was still the Review page. It
+    reported "None of the passport book options exist on this Fees page",
+    which reads like the site renamed something and sent the investigation
+    into the wrong place entirely. The page never arrived.
+    """
+    for attempt in range(1, attempts + 1):
+        if any(is_visible(driver, selector) for selector in FEE_PAGE_MARKERS):
+            return
+        check_for_block(driver, context="waiting for the Fees page")
+        log(f"Fees page has not appeared yet (attempt {attempt}/{attempts}) - "
+            "clicking Next again; the site discards a click that lands mid-postback")
+        pause_between_steps()
+        click_next(driver)
+    raise SeleniumTimeout(
+        "The wizard never reached the Fees page - it is still on "
+        f"{driver.title!r}. The Next click on the previous step did not take "
+        "effect. See the debug screenshot for which page it is actually on.")
+
+
 def step_fees(driver, d):
     log("Step 9: Fees (business rule: Book / Routine / Standard, always)")
     p = "#PassportWizard_feesStep_"
+    _ensure_on_fees_page(driver)
     _log_fees_page(driver)
     check_first_present(driver, [p + "bookFee"], "passport book")
     # bookType52 (Large Book) intentionally left unchecked - business rule

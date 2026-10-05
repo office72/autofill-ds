@@ -138,6 +138,13 @@ def upload_run_output(handle: str, local_pdf_path, run_label: str) -> str:
     return f"formbridge:document:{result['stored'][0]['id']}"
 
 
+def record_block(machine: str, context: str, detail: str, spreadsheet_id: str = "") -> None:
+    """Counts an anti-bot block. There is no endpoint for it on the platform
+    yet, so it is printed rather than pretended about - the sheet-backed runs
+    are where the volume is today, and those do record it."""
+    print(f"[api_backend] anti-bot block on {machine} ({context}): {str(detail)[:120]}")
+
+
 def upload_debug_artifacts(handle: str, files, run_label: str) -> str:
     """A failed run's screenshot and page source. Uploaded to the case itself,
     so the evidence sits next to the applicant it belongs to instead of in a

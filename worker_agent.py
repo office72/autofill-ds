@@ -150,6 +150,18 @@ def _load_sheets_backend():
     return sheets_backend
 
 
+def _failed_columns(spreadsheet_id: str) -> list:
+    """Every applicant left on Status=Error, whatever the reason."""
+    try:
+        sheets_backend = _load_sheets_backend()
+        applicants = sheets_backend.load_all_applicants(spreadsheet_id)
+    except Exception as e:
+        print(f"[worker_agent] Could not read back the applicants' status: {e}")
+        return []
+    return [column for column, data in applicants.items()
+            if str(data.get(sheets_backend.STATUS_ROW_LABEL) or "").strip() == "Error"]
+
+
 def _retryable_failed_columns(spreadsheet_id: str) -> list:
     """Applicant columns whose Status is Error and whose Notes do NOT look
     like a data problem - i.e. the ones worth running again in a few
@@ -181,6 +193,14 @@ def _run_with_retries(sheets, row_number: int, job: dict) -> tuple:
     """
     exit_code = launcher.run_with_sheet(job["sheet_id"])
     if exit_code == 0:
+        # Exit code 0 only means the queue was worked through. A failure on one
+        # applicant is recorded on that applicant and deliberately does not
+        # abort the rest - so a row saying "done" while a client sits on
+        # Status=Error is exactly how a stuck case stays invisible (seen
+        # 2026-10-05). Report what actually happened to the people in it.
+        failed = _failed_columns(job["sheet_id"])
+        if failed:
+            return "error", f"finished, but {len(failed)} applicant(s) failed: {', '.join(failed)}"
         return "done", ""
 
     attempt = 1

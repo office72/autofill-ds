@@ -28,6 +28,13 @@ MINIMUM_FILES = ["run_autofill.py", "sheets_backend.py"]
 
 def check() -> list:
     problems = []
+    # The guard around the Review -> Fees stall, which only matters when a run
+    # is already going wrong.
+    guard = subprocess.run([sys.executable, str(HERE / "check_fees_guard.py")],
+                           capture_output=True, text=True, cwd=HERE)
+    if guard.returncode != 0:
+        problems.append("check_fees_guard.py failed: "
+                        + (guard.stdout or guard.stderr).strip().splitlines()[-1])
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         for name in MINIMUM_FILES:
