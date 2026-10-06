@@ -162,13 +162,29 @@ def pause_between_steps():
     time.sleep(random.uniform(7, 15))
 
 
+# Seconds to wait between two applicants' sessions, as "min,max". In the
+# environment rather than in code so pacing can be loosened on a machine that
+# is being blocked, without publishing anything - the one lever that reliably
+# helps is time, and needing a code change to pull it is backwards.
+APPLICANT_PAUSE_RANGE = os.environ.get("AUTOFILL_APPLICANT_PAUSE", "180,360")
+
+
 def pause_between_applicants():
     """Discovered live on 2026-08-09: pacing within one applicant's session
     (fields/steps) isn't enough on its own - launching a brand new browser
     session immediately after the previous applicant's finished (zero gap
     between separate sessions) tripped anti-bot blocking on 5 of 6 back-to-
-    back runs. Much longer gap between applicants than between steps."""
-    delay = random.uniform(90, 180)
+    back runs. Much longer gap between applicants than between steps.
+
+    Raised from 90-180s to 180-360s on 2026-10-06: three applicants of one
+    family ran at 11:36, 11:39 and 11:45, and the middle one was refused at
+    the wizard-start postback while the other two went through. Nine minutes
+    for three separate sessions was still too close together."""
+    try:
+        low, high = (float(x) for x in APPLICANT_PAUSE_RANGE.split(","))
+    except Exception:
+        low, high = 180.0, 360.0
+    delay = random.uniform(low, high)
     log(f"Pausing {delay:.0f}s before the next applicant (separate-session pacing)...")
     time.sleep(delay)
 
@@ -1506,6 +1522,14 @@ def run_one(data: dict) -> Path:
             check_for_block(driver, context="after 2nd Apply click")
 
             if count(driver, "#PassportWizard_aboutYouStep_firstNameTextBox") == 0:
+                # Counted, not just raised. This is the *common* shape of the
+                # blocking on this site - the wizard-start postback quietly
+                # refused, with no interstitial to match a signature against -
+                # and it was invisible in the Blocks tab while the loud shape
+                # was being counted (seen 2026-10-06: Maya failed this way
+                # between two successful applicants, and the tab stayed at 7).
+                _record_block("after 2nd Apply click",
+                              "wizard-start postback rejected (no interstitial)")
                 raise BotBlockedError(
                     "Still not on the About You step after two Apply clicks - the postback to "
                     "start the wizard was rejected. Not a Cloudflare interstitial (no block "
