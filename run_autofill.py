@@ -40,6 +40,8 @@ Usage:
 
 import argparse
 import datetime
+import os
+import json
 import random
 import re
 import shutil
@@ -1333,6 +1335,68 @@ def _build_driver_with_retry(attempts: int = 3, delay_seconds: int = 10):
     return build_driver()
 
 
+RUN_LOCK_FILE = CHROME_PROFILE_DIR.parent / "run.lock"
+
+
+def _pid_is_alive(pid: int) -> bool:
+    """True only if that process id is really running right now. A lock left
+    by a run that crashed must not block this machine forever."""
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"if (Get-Process -Id {int(pid)} -ErrorAction SilentlyContinue) {{ 'alive' }}"],
+            timeout=15, capture_output=True, text=True)
+        return "alive" in (result.stdout or "")
+    except Exception:
+        return False     # cannot tell -> treat the lock as stale rather than wedge the machine
+
+
+class AnotherRunInProgress(RuntimeError):
+    pass
+
+
+def _take_run_lock(handle: str):
+    """Refuses to start while another run owns this machine.
+
+    Every run begins by killing any Chrome that uses this bot's profile, to
+    clear leftovers from a crash - and that kill cannot tell a leftover from a
+    browser that is working right now. So a second Run click, while the first
+    run is still going, kills the first one's browser and both end in
+    "invalid session id". That happened on a live client (בלידן, 2026-10-06):
+    three applicants, three sessions destroyed, three Status=Error, and
+    nothing in the message to suggest the cause was a second click.
+
+    Serial-only is already the rule for this bot (the site blocks parallel
+    sessions). This makes the rule enforceable instead of remembered.
+    """
+    if RUN_LOCK_FILE.exists():
+        try:
+            owner = json.loads(RUN_LOCK_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            owner = {}
+        pid = owner.get("pid")
+        if pid and _pid_is_alive(pid):
+            raise AnotherRunInProgress(
+                f"A run is already in progress on this computer (started {owner.get('started')}, "
+                f"sheet {str(owner.get('handle'))[:20]}..., process {pid}). "
+                "Wait for it to finish - starting a second one now would kill the first one's "
+                "browser mid-form.")
+        log(f"Found a stale run lock from process {pid} (not running any more) - taking over.")
+    RUN_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    RUN_LOCK_FILE.write_text(json.dumps({
+        "pid": os.getpid(), "handle": str(handle),
+        "started": datetime.datetime.now().isoformat(timespec="seconds")}), encoding="utf-8")
+
+
+def _release_run_lock():
+    try:
+        RUN_LOCK_FILE.unlink()
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        log(f"Could not remove the run lock: {e}")
+
+
 def _kill_orphaned_chrome_processes(profile_dir: Path):
     """Root-caused live 2026-09-14: "chrome not reachable" happening on the
     very FIRST applicant of a run - not a same-run race between two
@@ -1534,6 +1598,14 @@ def run_all(spreadsheet_id: str, only_column: str = None):
     the rest of the queue. --column overrides the queue with a single column,
     regardless of its Status, for manual testing."""
     _select_backend(spreadsheet_id)
+    _take_run_lock(spreadsheet_id)
+    try:
+        _run_all_locked(spreadsheet_id, only_column)
+    finally:
+        _release_run_lock()
+
+
+def _run_all_locked(spreadsheet_id: str, only_column: str = None):
     if only_column:
         applicants = backend.load_all_applicants(spreadsheet_id)
         if only_column not in applicants:
@@ -1596,4 +1668,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     spreadsheet_id = _select_backend(args.sheet).resolve_to_spreadsheet_id(args.sheet)
-    run_all(spreadsheet_id, only_column=args.column)
+    try:
+        run_all(spreadsheet_id, only_column=args.column)
+    except AnotherRunInProgress as e:
+        # Clean message, not a traceback: the person who sees this clicked a
+        # button twice, and the useful information is one sentence long.
+        log(str(e))
+        sys.exit(2)
