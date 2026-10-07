@@ -423,6 +423,45 @@ def check_and_confirm(driver, selector, attempts=3):
     )
 
 
+def _postback_evidence(driver) -> str:
+    """What the page and the network actually did, at the moment the wizard
+    refused to start.
+
+    The two explanations look identical from the outside - Cloudflare refusing
+    the POST, or the site refusing it because its own hidden `submittedData`
+    field (filled by the page's JavaScript) was empty when we clicked. One is
+    an address problem and the other is a timing problem, and they need
+    opposite fixes, so this records which it was instead of leaving it to be
+    argued about.
+    """
+    bits = []
+    try:
+        value = driver.execute_script(
+            "var e = document.getElementById('submittedData'); return e ? e.value : '(no such field)';")
+        bits.append(f"submittedData={value!r}")
+    except Exception as e:
+        bits.append(f"submittedData unreadable ({type(e).__name__})")
+    try:
+        bits.append(f"readyState={driver.execute_script('return document.readyState')}")
+    except Exception:
+        pass
+    try:
+        statuses = []
+        for entry in driver.get_log("performance")[-250:]:
+            message = json.loads(entry["message"])["message"]
+            if message.get("method") != "Network.responseReceived":
+                continue
+            response = message["params"]["response"]
+            url = response.get("url", "")
+            if "pptform" in url or "state.gov" in url:
+                statuses.append(f"{response.get('status')} {url.split('?')[0][-60:]}")
+        if statuses:
+            bits.append("recent responses: " + " | ".join(statuses[-6:]))
+    except Exception as e:
+        bits.append(f"no performance log ({type(e).__name__})")
+    return "; ".join(bits)
+
+
 def _record_block(context: str, detail: str):
     """Counts this block somewhere a human can look later.
 
@@ -1383,6 +1422,10 @@ def build_driver():
     options.add_argument(f"--user-data-dir={CHROME_PROFILE_DIR}")
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
+    # Response statuses for the postbacks. Without this a refused postback and
+    # a successful-but-ignored one look identical from Python, and we spent
+    # two days reasoning about which of them it was.
+    options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
     return uc.Chrome(options=options, version_main=_detect_chrome_major_version())
 
 
@@ -1621,13 +1664,15 @@ def run_one(data: dict) -> Path:
                 # and it was invisible in the Blocks tab while the loud shape
                 # was being counted (seen 2026-10-06: Maya failed this way
                 # between two successful applicants, and the tab stayed at 7).
+                evidence = _postback_evidence(driver)
+                log(f"Evidence at refusal: {evidence}")
                 _record_block("after 2nd Apply click",
-                              "wizard-start postback rejected (no interstitial)")
+                              f"wizard-start postback rejected - {evidence}")
                 raise BotBlockedError(
                     "Still not on the About You step after two Apply clicks - the postback to "
                     "start the wizard was rejected. Not a Cloudflare interstitial (no block "
                     "signature matched), so this may be form validation or anti-bot rate-limiting "
-                    "specific to this session - check debug/ screenshot and notes.md."
+                    f"specific to this session. Evidence: {evidence}"
                 )
         else:
             pause_between_steps()

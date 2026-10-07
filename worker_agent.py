@@ -145,7 +145,21 @@ def _load_sheets_backend():
     # and sheets_backend resolves its credentials at import time - so without
     # it the retry check fails on a machine where the file is sitting right
     # there next to the launcher.
-    os.environ.setdefault("AUTOFILL_SERVICE_ACCOUNT", launcher.SERVICE_ACCOUNT_FILE)
+    os.environ["AUTOFILL_SERVICE_ACCOUNT"] = launcher.SERVICE_ACCOUNT_FILE
+
+    # worker_agent.py is a long-running poller (one process serving many
+    # jobs over days), and launcher.fetch_latest_code() rewrites
+    # bot_runtime/sheets_backend.py fresh before every job - but a plain
+    # `import sheets_backend` only reads the file the FIRST time; every
+    # later call in this same process reuses the cached module, frozen
+    # with whatever SERVICE_ACCOUNT_FILE it resolved on that first import.
+    # Real incident (2026-10-04/05): the very first resolution on a fresh
+    # Contabo process landed on the hardcoded dev-machine fallback path
+    # before AUTOFILL_SERVICE_ACCOUNT was set, and every job afterward kept
+    # failing on that same stale, wrong path - identically, for two days -
+    # even though the on-disk file and the env var were both correct by
+    # then. Force a fresh import every time so this can't get stuck again.
+    sys.modules.pop("sheets_backend", None)
     import sheets_backend
     return sheets_backend
 
