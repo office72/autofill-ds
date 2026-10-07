@@ -30,7 +30,7 @@ def check() -> list:
     problems = []
     # The guard around the Review -> Fees stall, which only matters when a run
     # is already going wrong.
-    for script in ("check_fees_guard.py", "check_run_lock.py", "check_block_detection.py"):
+    for script in ("check_step_advance.py", "check_run_lock.py", "check_block_detection.py"):
         guard = subprocess.run([sys.executable, str(HERE / script)],
                                capture_output=True, text=True, cwd=HERE)
         if guard.returncode != 0:

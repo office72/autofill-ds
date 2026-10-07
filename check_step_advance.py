@@ -1,4 +1,4 @@
-"""Checks the Review -> Fees guard, with a stand-in for the browser.
+"""Checks the step-advance guard, with a stand-in for the browser.
 
 The bug this exists for: on 2026-10-05 the bot clicked Next on the Review page,
 the site silently did not advance, and the bot then looked for fee controls on
@@ -6,9 +6,14 @@ what was still the Review page. It reported "None of the passport book options
 exist on this Fees page" - which reads as "the site renamed something" and sent
 the investigation to the wrong place for an hour.
 
+It happened again on 2026-10-07, one step earlier: About You -> Address, two
+applicants of a live client, same silent non-advance, same misleading timeout
+naming a field. So the guard is general now - advance_to() takes whichever
+step is expected - and this checks the decision rather than any one page.
+
 No browser here. A fake driver is enough, because what has to be right is the
 decision: notice the page did not arrive, click again, and if it still has not,
-say *that* rather than blaming the fee controls.
+say *that* rather than blaming the controls that were never on screen.
 
 Run: python check_fees_guard.py
 """
@@ -62,18 +67,18 @@ original = (run_autofill.is_visible, run_autofill.check_for_block,
 # Already there: no clicking at all.
 driver = FakeDriver(arrives_after=0)
 install_fakes(driver)
-run_autofill._ensure_on_fees_page(driver)
+run_autofill.advance_to(driver, ["#fee"], "the Fees page")
 check("already on Fees - does not touch anything", driver.next_clicks, 0)
 
 # The real case: one more Next and it appears.
 driver = FakeDriver(arrives_after=1)
-run_autofill._ensure_on_fees_page(driver)
+run_autofill.advance_to(driver, ["#fee"], "the Fees page")
 check("a stalled page is clicked again and arrives", driver.next_clicks, 1)
 
 # Still nothing after every attempt: the error must name the real problem.
 driver = FakeDriver(arrives_after=99)
 try:
-    run_autofill._ensure_on_fees_page(driver, attempts=3)
+    run_autofill.advance_to(driver, ["#fee"], "the Fees page", attempts=3)
     check("gives up with a clear error", "no error raised", "SeleniumTimeout")
 except run_autofill.SeleniumTimeout as e:
     message = str(e)
@@ -94,7 +99,7 @@ def blocked(d, context=""):
 
 run_autofill.check_for_block = blocked
 try:
-    run_autofill._ensure_on_fees_page(driver)
+    run_autofill.advance_to(driver, ["#fee"], "the Fees page")
     check("a block while waiting is raised as a block", "no error", "BotBlockedError")
 except run_autofill.BotBlockedError:
     check("a block while waiting is raised as a block", True, True)

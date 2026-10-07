@@ -760,6 +760,7 @@ def step_about_you(driver, d):
 def step_address(driver, d):
     log("Step 2: Address")
     p = "#PassportWizard_addressStep_"
+    advance_to(driver, p + "mailStreetTextBox", "the Address step")
     fill_text(driver, p + "mailStreetTextBox", d.get("Mail Street"))
     fill_text(driver, p + "mailCityTextBox", d.get("Mail City"))
     mail_country = d.get("Mail Country")
@@ -1187,35 +1188,39 @@ FEE_PAGE_MARKERS = ("#PassportWizard_feesStep_bookFee",
                     "#PassportWizard_feesStep_bookRoutineService")
 
 
-def _ensure_on_fees_page(driver, attempts: int = 3):
-    """Makes sure the wizard actually got to Fees before looking for fee
-    options on it.
+def advance_to(driver, markers, what: str, attempts: int = 3):
+    """Makes sure the wizard really is on the next step before working on it.
 
-    Found live 2026-10-05 on a real client: Next was clicked on the Review
-    page, the page did not advance - the site does this silently - and the bot
-    then searched for fee controls on what was still the Review page. It
-    reported "None of the passport book options exist on this Fees page",
-    which reads like the site renamed something and sent the investigation
-    into the wrong place entirely. The page never arrived.
+    This site does not always advance when Next is clicked, and it says
+    nothing when it doesn't - no error, no validation message, the same page.
+    The bot then looks for the next page's fields, cannot find them, and
+    reports a timeout naming a field, which reads like the site renamed
+    something. Twice now that sent a day's debugging in the wrong direction:
+    the Review -> Fees stall (2026-10-05) and the About You -> Address stall
+    (2026-10-07, two applicants of a live client).
+
+    So: look for the step we expect, click Next again if it is not there, and
+    if it still is not, say *that* - naming the page we are actually on.
     """
+    markers = [markers] if isinstance(markers, str) else list(markers)
     for attempt in range(1, attempts + 1):
-        if any(is_visible(driver, selector) for selector in FEE_PAGE_MARKERS):
+        if any(is_visible(driver, selector) for selector in markers):
             return
-        check_for_block(driver, context="waiting for the Fees page")
-        log(f"Fees page has not appeared yet (attempt {attempt}/{attempts}) - "
-            "clicking Next again; the site discards a click that lands mid-postback")
+        check_for_block(driver, context=f"waiting for {what}")
+        log(f"{what} has not appeared yet (attempt {attempt}/{attempts}) - clicking Next "
+            "again; the site discards a click that lands mid-postback")
         pause_between_steps()
         click_next(driver)
     raise SeleniumTimeout(
-        "The wizard never reached the Fees page - it is still on "
-        f"{driver.title!r}. The Next click on the previous step did not take "
-        "effect. See the debug screenshot for which page it is actually on.")
+        f"The wizard never reached {what} - it is still on {driver.title!r}. The Next "
+        "click on the previous step did not take effect. See the debug screenshot for "
+        "which page it is actually on.")
 
 
 def step_fees(driver, d):
     log("Step 9: Fees (business rule: Book / Routine / Standard, always)")
     p = "#PassportWizard_feesStep_"
-    _ensure_on_fees_page(driver)
+    advance_to(driver, FEE_PAGE_MARKERS, "the Fees page")
     _log_fees_page(driver)
     check_first_present(driver, [p + "bookFee"], "passport book")
     # bookType52 (Large Book) intentionally left unchecked - business rule
