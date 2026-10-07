@@ -842,6 +842,7 @@ def step_travel_plans(driver, d):
 def step_emergency_contact(driver, d):
     log("Step 3: Emergency Contact")
     p = "#PassportWizard_emergencyContacts_"
+    advance_to(driver, p + "ecNameTextBox", "the Emergency Contact step")
     fill_text(driver, p + "ecNameTextBox", d.get("EC Name"))
     fill_text(driver, p + "ecAddressTextBox", d.get("EC Address"))
     fill_text(driver, p + "ecApartmentTextBox", d.get("EC Apartment"))
@@ -1188,7 +1189,7 @@ FEE_PAGE_MARKERS = ("#PassportWizard_feesStep_bookFee",
                     "#PassportWizard_feesStep_bookRoutineService")
 
 
-def advance_to(driver, markers, what: str, attempts: int = 3):
+def advance_to(driver, markers, what: str, attempts: int = 3, click=None):
     """Makes sure the wizard really is on the next step before working on it.
 
     This site does not always advance when Next is clicked, and it says
@@ -1207,10 +1208,11 @@ def advance_to(driver, markers, what: str, attempts: int = 3):
         if any(is_visible(driver, selector) for selector in markers):
             return
         check_for_block(driver, context=f"waiting for {what}")
-        log(f"{what} has not appeared yet (attempt {attempt}/{attempts}) - clicking Next "
-            "again; the site discards a click that lands mid-postback")
+        action = click or click_next
+        log(f"{what} has not appeared yet (attempt {attempt}/{attempts}) - clicking "
+            f"{action.__name__} again; the site discards a click that lands mid-postback")
         pause_between_steps()
-        click_next(driver)
+        action(driver)
     raise SeleniumTimeout(
         f"The wizard never reached {what} - it is still on {driver.title!r}. The Next "
         "click on the previous step did not take effect. See the debug screenshot for "
@@ -1295,6 +1297,7 @@ def wait_for_new_download(before: set, timeout: int) -> Path:
 
 def step_final_print(driver, d, out_path: Path):
     log("Final step: acknowledgment + Print Form")
+    advance_to(driver, "#PassportWizard_nextStepsStep_ConfirmationCheckBox", "the Next Steps page", click=click_finish)
     check(driver, "#PassportWizard_nextStepsStep_ConfirmationCheckBox")
 
     before = set(DOWNLOAD_DIR.glob("*"))

@@ -104,6 +104,26 @@ try:
 except run_autofill.BotBlockedError:
     check("a block while waiting is raised as a block", True, True)
 
+
+# --- the guard must be able to re-click whatever moves *this* step on ------
+# The transition into the Next Steps page is driven by Finish, not Next, and
+# clicking the wrong button there would do nothing at all.
+finishes = []
+
+
+def click_finish(d):
+    finishes.append(1)
+    d.next_clicks += 1
+
+
+driver = FakeDriver(arrives_after=1)
+run_autofill.is_visible = lambda d, selector: d.on_fees
+run_autofill.check_for_block = lambda d, context="": None
+run_autofill.pause_between_steps = lambda: None
+run_autofill.log = lambda *a, **k: None
+run_autofill.advance_to(driver, ["#confirm"], "the Next Steps page", click=click_finish)
+check("it clicks Finish when told to", (len(finishes), driver.next_clicks), (1, 1))
+
 (run_autofill.is_visible, run_autofill.check_for_block, run_autofill.pause_between_steps,
  run_autofill.click_next, run_autofill.log) = original
 
