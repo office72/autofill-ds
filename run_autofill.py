@@ -1195,8 +1195,22 @@ FEE_PAGE_MARKERS = ("#PassportWizard_feesStep_bookFee",
 # still in flight only discards it and starts over.
 STEP_ADVANCE_WAIT_SECONDS = float(os.environ.get("AUTOFILL_STEP_ADVANCE_WAIT", "60"))
 
+# The last submit is different, in two ways that matter.
+#
+# It is the slow one - this is where the site builds the application - and
+# watching the screen on 2026-10-07 a *manual* click hung there too, which
+# says the wait belongs to the site and not to anything we do. The same hang
+# is in notes.md twice from September (TEENA, CHILDINY), both times put down
+# to a site-side calculation bug.
+#
+# And it must never be clicked twice. Everything else on this wizard is a
+# navigation step; this one submits the application, and a second click could
+# submit it again.
+FINISH_WAIT_SECONDS = float(os.environ.get("AUTOFILL_FINISH_WAIT", "240"))
 
-def advance_to(driver, markers, what: str, attempts: int = 3, click=None):
+
+def advance_to(driver, markers, what: str, attempts: int = 3, click=None,
+               wait_seconds: float = None):
     """Makes sure the wizard really is on the next step before working on it.
 
     This site does not always advance when the step button is clicked, and it
@@ -1217,7 +1231,7 @@ def advance_to(driver, markers, what: str, attempts: int = 3, click=None):
         return any(is_visible(driver, selector) for selector in markers)
 
     for attempt in range(1, attempts + 1):
-        deadline = time.time() + STEP_ADVANCE_WAIT_SECONDS
+        deadline = time.time() + (wait_seconds or STEP_ADVANCE_WAIT_SECONDS)
         while True:
             if arrived():
                 return
@@ -1226,7 +1240,8 @@ def advance_to(driver, markers, what: str, attempts: int = 3, click=None):
                 break
             time.sleep(3)
         if attempt < attempts:
-            log(f"{what} still has not appeared after {STEP_ADVANCE_WAIT_SECONDS:.0f}s "
+            log(f"{what} still has not appeared after "
+                f"{wait_seconds or STEP_ADVANCE_WAIT_SECONDS:.0f}s "
                 f"(attempt {attempt}/{attempts}) - clicking {action.__name__} again")
             pause_between_steps()
             action(driver)
@@ -1317,7 +1332,10 @@ def wait_for_new_download(before: set, timeout: int) -> Path:
 
 def step_final_print(driver, d, out_path: Path):
     log("Final step: acknowledgment + Print Form")
-    advance_to(driver, "#PassportWizard_nextStepsStep_ConfirmationCheckBox", "the Next Steps page", click=click_finish)
+    # One attempt, and a long one: see FINISH_WAIT_SECONDS. Clicking Finish
+    # again is not a retry here, it is a second submission.
+    advance_to(driver, "#PassportWizard_nextStepsStep_ConfirmationCheckBox",
+               "the Next Steps page", attempts=1, wait_seconds=FINISH_WAIT_SECONDS)
     check(driver, "#PassportWizard_nextStepsStep_ConfirmationCheckBox")
 
     before = set(DOWNLOAD_DIR.glob("*"))

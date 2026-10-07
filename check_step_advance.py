@@ -133,6 +133,25 @@ run_autofill.log = lambda *a, **k: None
 run_autofill.advance_to(driver, ["#confirm"], "the Next Steps page", click=click_finish)
 check("it clicks Finish when told to", (len(finishes), driver.next_clicks), (1, 1))
 
+
+# --- the last submit must never be clicked twice -------------------------
+# Every other step is navigation. This one submits the application, so a
+# "retry" there is a second submission.
+clicks = []
+driver = FakeDriver(arrives_after=99)
+run_autofill.is_visible = lambda d, selector: d.on_fees
+run_autofill.check_for_block = lambda d, context="": None
+run_autofill.pause_between_steps = lambda: None
+run_autofill.log = lambda *a, **k: None
+try:
+    run_autofill.advance_to(driver, ["#confirm"], "the Next Steps page",
+                            attempts=1, wait_seconds=6,
+                            click=lambda d: clicks.append(1))
+    check("a single-attempt step still fails loudly", "no error", "SeleniumTimeout")
+except run_autofill.SeleniumTimeout:
+    check("a single-attempt step still fails loudly", True, True)
+check("and it was never clicked again", (len(clicks), driver.next_clicks), (0, 0))
+
 (run_autofill.is_visible, run_autofill.check_for_block, run_autofill.pause_between_steps,
  run_autofill.click_next, run_autofill.log) = original
 
