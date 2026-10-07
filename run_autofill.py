@@ -125,21 +125,50 @@ DEFAULT_WAIT = 20  # seconds - the site is often slow even before pacing delays
 # Title/body substrings seen on Cloudflare (or similar WAF) interstitial and
 # block pages - see notes.md / project memory on pptform.state.gov's anti-bot
 # behavior. Checked case-insensitively.
-BLOCK_TITLE_SIGNATURES = (
+# Two different pages, and they need opposite responses.
+#
+# A CHALLENGE is Cloudflare deciding whether to let this browser through. It
+# clears on its own, usually in seconds - that is what undetected-chromedriver
+# is for. Waiting is the right answer, and aborting is simply throwing a run
+# away: on 2026-10-07 a run was abandoned on a challenge that had *already*
+# cleared by the next line of code, which is how the error ended up quoting
+# the real site's own title back as if it were a block page.
+#
+# A HARD BLOCK is the door shut. More patience buys nothing there, and
+# hammering it makes the next attempt worse.
+#
+# "ray id" is deliberately in neither: Cloudflare prints it on both kinds of
+# page, so on its own it says nothing about which one this is.
+CHALLENGE_TITLE_SIGNATURES = (
     "just a moment",
+    "please wait",
+)
+CHALLENGE_BODY_SIGNATURES = (
+    "checking your browser before accessing",
+    "cf-browser-verification",
+    "verifying you are human",
+)
+BLOCK_TITLE_SIGNATURES = (
     "attention required",
     "access denied",
     "403 forbidden",
-    "please wait",
 )
 BLOCK_BODY_SIGNATURES = (
-    "cf-browser-verification",
-    "checking your browser before accessing",
     "cf-error-details",
-    "ray id",
     "unusual traffic",
     "sorry, you have been blocked",
 )
+
+# How long to let a challenge resolve before giving up on it. In the
+# environment, like the pacing, so a machine that is getting slower challenges
+# can be given more room without publishing code.
+CHALLENGE_WAIT_SECONDS = float(os.environ.get("AUTOFILL_CHALLENGE_WAIT", "90"))
+
+# How long to keep waiting for the wizard itself to open after the Apply
+# click, before treating the postback as refused. Same reasoning: the cost of
+# waiting is a minute, the cost of giving up is the whole run plus another
+# session against a site that is already suspicious.
+WIZARD_START_WAIT_SECONDS = float(os.environ.get("AUTOFILL_WIZARD_START_WAIT", "60"))
 
 
 class BotBlockedError(Exception):
@@ -409,25 +438,71 @@ def _record_block(context: str, detail: str):
         pass   # a run already failing must not fail differently because of this
 
 
-def check_for_block(driver, context: str = ""):
-    """Looks for known anti-bot interstitial/block signatures on the current
-    page and raises BotBlockedError if found, instead of letting the run fall
-    through to a generic (and much less informative) Selenium timeout later."""
+def _page_snapshot(driver) -> tuple:
+    """(title, body), read once. Reading twice is what produced the most
+    misleading error this project has seen: the title was matched while the
+    challenge was up, re-read for the message after it had cleared, and the
+    error then quoted the real site's own title as the thing that looked like
+    a block page."""
     try:
         title = (driver.title or "").lower()
     except UnexpectedAlertPresentException:
         _accept_stray_alert(driver)
         title = (driver.title or "").lower()
-    for sig in BLOCK_TITLE_SIGNATURES:
-        if sig in title:
-            _record_block(context, f"title {driver.title!r}")
-            raise BotBlockedError(f"[{context}] page title looks like a block/challenge page: {driver.title!r}")
+    return title, (driver.page_source or "").lower()
 
-    body = driver.page_source.lower()
-    for sig in BLOCK_BODY_SIGNATURES:
-        if sig in body:
-            _record_block(context, f"body signature {sig!r}")
-            raise BotBlockedError(f"[{context}] page body contains block signature {sig!r}")
+
+def _matching(signature_pairs, title: str, body: str) -> str:
+    for signatures, text, where in signature_pairs:
+        for sig in signatures:
+            if sig in text:
+                return f"{where} {sig!r}"
+    return ""
+
+
+def check_for_block(driver, context: str = ""):
+    """Looks at the current page and decides between three things: this is the
+    site, this is a challenge worth waiting out, or this is a block.
+
+    Raises BotBlockedError only for the third, or for a challenge that never
+    cleared.
+    """
+    title, body = _page_snapshot(driver)
+
+    hard = _matching([(BLOCK_TITLE_SIGNATURES, title, "title"),
+                      (BLOCK_BODY_SIGNATURES, body, "body")], title, body)
+    if hard:
+        _record_block(context, f"hard block, {hard}")
+        raise BotBlockedError(
+            f"[{context}] blocked by the site: {hard}. Waiting will not help - "
+            "this address needs to stop for a while.")
+
+    challenge = _matching([(CHALLENGE_TITLE_SIGNATURES, title, "title"),
+                           (CHALLENGE_BODY_SIGNATURES, body, "body")], title, body)
+    if not challenge:
+        return
+
+    log(f"[{context}] Cloudflare challenge on screen ({challenge}) - "
+        f"waiting up to {CHALLENGE_WAIT_SECONDS:.0f}s for it to clear...")
+    deadline = time.time() + CHALLENGE_WAIT_SECONDS
+    while time.time() < deadline:
+        time.sleep(3)
+        title, body = _page_snapshot(driver)
+        hard = _matching([(BLOCK_TITLE_SIGNATURES, title, "title"),
+                          (BLOCK_BODY_SIGNATURES, body, "body")], title, body)
+        if hard:
+            _record_block(context, f"challenge turned into a hard block, {hard}")
+            raise BotBlockedError(f"[{context}] the challenge became a block: {hard}")
+        if not _matching([(CHALLENGE_TITLE_SIGNATURES, title, "title"),
+                          (CHALLENGE_BODY_SIGNATURES, body, "body")], title, body):
+            log(f"[{context}] challenge cleared - carrying on.")
+            return
+
+    _record_block(context, f"challenge did not clear in {CHALLENGE_WAIT_SECONDS:.0f}s ({challenge})")
+    raise BotBlockedError(
+        f"[{context}] the Cloudflare challenge ({challenge}) did not clear within "
+        f"{CHALLENGE_WAIT_SECONDS:.0f}s. Raise AUTOFILL_CHALLENGE_WAIT if this machine "
+        "is simply slow, otherwise it is being throttled.")
 
 
 def click(driver, selector):
@@ -1520,6 +1595,24 @@ def run_one(data: dict) -> Path:
             pause_between_steps()
             log(f"URL after 2nd Apply click: {driver.current_url}, title: {driver.title}")
             check_for_block(driver, context="after 2nd Apply click")
+
+            # Give it time before declaring it refused. The postback can be
+            # slow on its own, and a challenge may have been resolving in the
+            # background while check_for_block was watching it - this is the
+            # "it thought for a long time and then closed" the user saw on
+            # Contabo (2026-10-07). Patience costs a minute; giving up costs
+            # the run and adds another session to whatever made the site
+            # suspicious in the first place.
+            if count(driver, "#PassportWizard_aboutYouStep_firstNameTextBox") == 0:
+                log(f"Not on About You yet - waiting up to {WIZARD_START_WAIT_SECONDS:.0f}s "
+                    "for the wizard to start...")
+                deadline = time.time() + WIZARD_START_WAIT_SECONDS
+                while time.time() < deadline:
+                    time.sleep(5)
+                    check_for_block(driver, context="waiting for the wizard to start")
+                    if count(driver, "#PassportWizard_aboutYouStep_firstNameTextBox") > 0:
+                        log("The wizard started - carrying on.")
+                        break
 
             if count(driver, "#PassportWizard_aboutYouStep_firstNameTextBox") == 0:
                 # Counted, not just raised. This is the *common* shape of the
