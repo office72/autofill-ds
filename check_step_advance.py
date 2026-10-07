@@ -18,11 +18,17 @@ say *that* rather than blaming the controls that were never on screen.
 Run: python check_fees_guard.py
 """
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 import run_autofill  # noqa: E402
+
+run_autofill.STEP_ADVANCE_WAIT_SECONDS = 6      # keep the checks quick
+run_autofill._postback_evidence = lambda driver: "submittedData='x'; 200 /Passport/"
+run_autofill._record_block = lambda context, detail: None
+time.sleep = lambda s: None
 
 failures = []
 
@@ -82,7 +88,10 @@ try:
     check("gives up with a clear error", "no error raised", "SeleniumTimeout")
 except run_autofill.SeleniumTimeout as e:
     message = str(e)
-    check("gives up after the attempts", driver.next_clicks, 3)
+    # Three attempts, two clicks: the first attempt waits out the click the
+    # caller already made, and there is no point clicking again after the last
+    # wait only to give up on it.
+    check("clicks between attempts, not after the last one", driver.next_clicks, 2)
     check("and says the page never arrived", "never reached the Fees page" in message, True)
     check("and names what is on screen instead",
           "Passport Application System" in message, True)

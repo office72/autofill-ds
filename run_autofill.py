@@ -1189,34 +1189,54 @@ FEE_PAGE_MARKERS = ("#PassportWizard_feesStep_bookFee",
                     "#PassportWizard_feesStep_bookRoutineService")
 
 
+# How long to wait for a step to appear after clicking, before clicking
+# again. The postback itself can be slow - the user watching the screen
+# describes it as "thinking for a long time" - and clicking again while it is
+# still in flight only discards it and starts over.
+STEP_ADVANCE_WAIT_SECONDS = float(os.environ.get("AUTOFILL_STEP_ADVANCE_WAIT", "60"))
+
+
 def advance_to(driver, markers, what: str, attempts: int = 3, click=None):
     """Makes sure the wizard really is on the next step before working on it.
 
-    This site does not always advance when Next is clicked, and it says
-    nothing when it doesn't - no error, no validation message, the same page.
-    The bot then looks for the next page's fields, cannot find them, and
+    This site does not always advance when the step button is clicked, and it
+    says nothing when it doesn't - no error, no validation message, the same
+    page. The bot then looks for the next page's fields, cannot find them, and
     reports a timeout naming a field, which reads like the site renamed
-    something. Twice now that sent a day's debugging in the wrong direction:
-    the Review -> Fees stall (2026-10-05) and the About You -> Address stall
-    (2026-10-07, two applicants of a live client).
+    something. That sent debugging the wrong way three times: Review -> Fees
+    (2026-10-05), About You -> Address and Fees -> Next Steps (2026-10-07).
 
-    So: look for the step we expect, click Next again if it is not there, and
-    if it still is not, say *that* - naming the page we are actually on.
+    Each attempt waits out the postback before deciding it failed, because the
+    slow case and the refused case look the same for the first half-minute and
+    clicking into a request that is still in flight only throws it away.
     """
     markers = [markers] if isinstance(markers, str) else list(markers)
+    action = click or click_next
+
+    def arrived() -> bool:
+        return any(is_visible(driver, selector) for selector in markers)
+
     for attempt in range(1, attempts + 1):
-        if any(is_visible(driver, selector) for selector in markers):
-            return
-        check_for_block(driver, context=f"waiting for {what}")
-        action = click or click_next
-        log(f"{what} has not appeared yet (attempt {attempt}/{attempts}) - clicking "
-            f"{action.__name__} again; the site discards a click that lands mid-postback")
-        pause_between_steps()
-        action(driver)
+        deadline = time.time() + STEP_ADVANCE_WAIT_SECONDS
+        while True:
+            if arrived():
+                return
+            check_for_block(driver, context=f"waiting for {what}")
+            if time.time() >= deadline:
+                break
+            time.sleep(3)
+        if attempt < attempts:
+            log(f"{what} still has not appeared after {STEP_ADVANCE_WAIT_SECONDS:.0f}s "
+                f"(attempt {attempt}/{attempts}) - clicking {action.__name__} again")
+            pause_between_steps()
+            action(driver)
+
+    evidence = _postback_evidence(driver)
+    log(f"Evidence at the stall: {evidence}")
+    _record_block(f"waiting for {what}", f"step never arrived - {evidence}")
     raise SeleniumTimeout(
-        f"The wizard never reached {what} - it is still on {driver.title!r}. The Next "
-        "click on the previous step did not take effect. See the debug screenshot for "
-        "which page it is actually on.")
+        f"The wizard never reached {what} - it is still on {driver.title!r} after "
+        f"{attempts} attempts. The postback did not take effect. Evidence: {evidence}")
 
 
 def step_fees(driver, d):
