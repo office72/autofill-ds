@@ -61,8 +61,12 @@ COLUMNS = ["job_id", "sheet_id", "status", "requested_at", "started_at", "finish
 # the same way, so retrying it just burns runs against a site that already
 # rate-limits us. Retry markers are matched against the Notes text the bot
 # itself wrote into the applicant's column.
+# The retry now lives in run_autofill, per applicant, immediately and once
+# (ATTEMPTS_PER_APPLICANT). Leaving a second layer here would mean four
+# sessions where the user asked for two, and this one re-runs the whole sheet
+# rather than the applicant that failed.
 RETRY_DELAY_SECONDS = 300
-MAX_ATTEMPTS = 2
+MAX_ATTEMPTS = 1
 NO_RETRY_NOTE_MARKERS = (
     "error on the following field",   # FieldValidationError - the site rejected a value
     "negative number",                # _validate_applicant_data - broken Sheet cell

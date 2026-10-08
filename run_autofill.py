@@ -1813,6 +1813,46 @@ def run_all(spreadsheet_id: str, only_column: str = None):
         _release_run_lock()
 
 
+# A failed applicant is simply retried, straight away, in a brand new browser
+# session. Nothing has been sent anywhere when a run fails: this wizard never
+# submits online - Finish only leads to the page the PDF is printed from - so
+# a second attempt cannot duplicate anything. It either produces the PDF that
+# the first attempt did not, or it fails the same way and we have learned
+# that the failure is not a fluke.
+#
+# Immediately, and once, by the user's decision (2026-10-08). A longer gap
+# would be kinder to the site's rate limiting, so if blocking gets worse this
+# is the first number to raise.
+ATTEMPTS_PER_APPLICANT = int(os.environ.get("AUTOFILL_APPLICANT_ATTEMPTS", "2"))
+
+# What a second session cannot fix: the site rejecting the answers themselves,
+# or a scenario this bot does not implement. Retrying those burns a session
+# against a site that already rate-limits us, to reach the same end.
+NO_RETRY_EXCEPTIONS = ("FieldValidationError",)
+NO_RETRY_MESSAGES = ("is not implemented", "negative number")
+
+
+def _worth_retrying(error: Exception) -> bool:
+    if type(error).__name__ in NO_RETRY_EXCEPTIONS:
+        return False
+    return not any(marker in str(error).lower() for marker in NO_RETRY_MESSAGES)
+
+
+def _run_one_with_retry(data: dict, column_letter: str):
+    last_error = None
+    for attempt in range(1, ATTEMPTS_PER_APPLICANT + 1):
+        try:
+            return run_one(data)
+        except Exception as e:
+            last_error = e
+            if attempt >= ATTEMPTS_PER_APPLICANT or not _worth_retrying(e):
+                raise
+            log(f"Applicant {column_letter} failed on attempt {attempt}"
+                f"/{ATTEMPTS_PER_APPLICANT} ({type(e).__name__}: {str(e)[:90]}) - "
+                "starting a fresh session for the same applicant.")
+    raise last_error
+
+
 def _run_all_locked(spreadsheet_id: str, only_column: str = None):
     if only_column:
         applicants = backend.load_all_applicants(spreadsheet_id)
@@ -1837,7 +1877,7 @@ def _run_all_locked(spreadsheet_id: str, only_column: str = None):
         backend.set_status(spreadsheet_id, column_letter, backend.RUNNING_STATUS)
 
         try:
-            out_path = run_one(data)
+            out_path = _run_one_with_retry(data, column_letter)
         except Exception as e:
             log(f"Applicant {column_letter} FAILED: {e}")
             note = str(e)[:400]
