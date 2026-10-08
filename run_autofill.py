@@ -623,6 +623,16 @@ def check_for_block(driver, context: str = ""):
 
     log(f"[{context}] Cloudflare challenge on screen ({challenge}) - "
         f"waiting up to {CHALLENGE_WAIT_SECONDS:.0f}s for it to clear...")
+    # The challenge can appear in the middle of a run, not only on the first
+    # page - that is exactly what happened on Contabo on 2026-10-08, where a
+    # person happened to be watching and ticked the box, and the run carried
+    # on from there. Doing it here is what makes that rescue automatic when
+    # nobody is watching.
+    try:
+        if click_not_a_robot_if_present(driver):
+            time.sleep(5)
+    except Exception as e:
+        log(f"  (could not answer the challenge widget: {type(e).__name__}: {e})")
     deadline = time.time() + CHALLENGE_WAIT_SECONDS
     while time.time() < deadline:
         time.sleep(3)

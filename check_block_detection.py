@@ -111,6 +111,23 @@ run_autofill.check_for_block(FakePage([("Passport Application System",
                                         "<html>Ray ID: 9a2b3c</html>")]), context="t")
 check("a ray id alone is not a block", recorded, [])
 
+
+# --- a challenge mid-run gets the box ticked, not just waited on ---------
+# This is the rescue a person performed by hand on Contabo (2026-10-08): the
+# challenge appeared in the middle of a run, the box was ticked, and the run
+# carried on. It should not depend on somebody watching the screen.
+ticked = []
+run_autofill.click_not_a_robot_if_present = lambda driver: ticked.append(1) or True
+recorded.clear()
+run_autofill.check_for_block(FakePage([CHALLENGE, CHALLENGE, SITE]), context="mid-run")
+check("a mid-run challenge gets the box ticked", len(ticked), 1)
+check("and the run still carries on when it clears", recorded, [])
+
+ticked.clear()
+run_autofill.click_not_a_robot_if_present = lambda driver: False
+run_autofill.check_for_block(FakePage([SITE]), context="t")
+check("no challenge, no clicking", ticked, [])
+
 time.sleep = original_sleep
 print()
 print("FAILED" if failures else "all checks passed")
