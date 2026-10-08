@@ -23,7 +23,9 @@ SCOPES = ["https://www.googleapis.com/auth/drive"]
 # per run (it *is* the thing that fetches), but downloadable from the Drive
 # folder on a worker machine, which beats copying a file over RDP.
 FILES_TO_PUBLISH = ["run_autofill.py", "sheets_backend.py", "api_backend.py",
-                    "worker_agent.py", "launcher.py"]
+                    "worker_agent.py", "launcher.py",
+                    # downloadable diagnostics, not fetched per run
+                    "check_browser_fingerprint.py"]
 
 
 def publish():
