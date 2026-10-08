@@ -519,6 +519,28 @@ def _os_click(driver, element) -> bool:
         return False
 
 
+def _log_clearance(driver):
+    """Says whether this machine still holds Cloudflare's clearance.
+
+    Worth one line in every log: the clearance is a cookie in the persistent
+    profile, it is what the difference between a day of 403s and a day of
+    clean runs turned out to be, and when it lapses the fix is a person
+    ticking a box once - not anything in this code.
+    """
+    try:
+        cookie = driver.get_cookie("cf_clearance")
+    except Exception:
+        return
+    if cookie:
+        expires = cookie.get("expiry")
+        when = (datetime.datetime.fromtimestamp(expires).strftime("%d/%m %H:%M")
+                if expires else "no expiry given")
+        log(f"Cloudflare clearance: present (until {when}).")
+    else:
+        log("Cloudflare clearance: NOT present on this machine. If the site starts "
+            "refusing, tick 'I am not a robot' once in this browser by hand.")
+
+
 def click_not_a_robot_if_present(driver) -> bool:
     """Ticks an "I am not a robot" box, if one is on the page.
 
@@ -1585,7 +1607,22 @@ def _build_driver_with_retry(attempts: int = 3, delay_seconds: int = 10):
     # is what actually fixed it, confirmed by hand on that machine. Only
     # reached after the lighter attempts above have already failed, so a
     # transient/unrelated failure never pays this cost.
-    log(f"Chrome still won't start after {attempts} attempts - wiping the whole profile and trying once more.")
+    # Keep a copy first. The profile is not just a browser profile: it holds
+    # the Cloudflare clearance this machine earned, and on Contabo that
+    # clearance was earned by a person connecting over RDP and ticking the box
+    # by hand (2026-10-08). Every run since has gone through because of it.
+    # Throwing that away silently would bring back a whole day of 403s and
+    # nobody would connect the two.
+    backup = CHROME_PROFILE_DIR.parent / f"chrome_profile_backup_{int(time.time())}"
+    log(f"Chrome still won't start after {attempts} attempts - wiping the profile and "
+        "trying once more.")
+    log(f"  !! This also loses the Cloudflare clearance stored in it. A copy is kept at "
+        f"{backup.name}; if the site starts refusing after this, connect to this machine, "
+        "open the site in the bot's browser and tick 'I am not a robot' once.")
+    try:
+        shutil.copytree(CHROME_PROFILE_DIR, backup, dirs_exist_ok=True)
+    except Exception as e:
+        log(f"  (could not back the profile up first: {e})")
     try:
         shutil.rmtree(CHROME_PROFILE_DIR, ignore_errors=True)
     except Exception as e:
@@ -1746,6 +1783,7 @@ def run_one(data: dict) -> Path:
     try:
         driver.get(WIZARD_URL)
         time.sleep(3)
+        _log_clearance(driver)
         # Before anything else on the page: if an "I am not a robot" box is
         # being shown, answer it. Nothing does this today because nothing has
         # shown one - the refusals are 403s with no widget - but when the site
