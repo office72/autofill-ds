@@ -477,6 +477,84 @@ def _record_block(context: str, detail: str):
         pass   # a run already failing must not fail differently because of this
 
 
+# Where an "I am not a robot" box lives when one is shown at all. Only these
+# are ever clicked: the point is to answer a challenge widget, never to press
+# something on the government form itself.
+CHALLENGE_FRAME_SOURCES = ("challenges.cloudflare.com", "recaptcha/api2/anchor",
+                           "hcaptcha.com/captcha")
+CHALLENGE_BOX_SELECTORS = ("input[type=checkbox]", "#checkbox", ".recaptcha-checkbox",
+                           "label.cb-lb input", "span#checkbox")
+
+
+def _os_click(driver, element) -> bool:
+    """A real mouse click, at the element's place on the screen.
+
+    A WebDriver click is a synthetic event, and the whole purpose of these
+    widgets is to tell the difference - so when one is actually shown, the
+    click has to come from the operating system. Needs a visible desktop,
+    which this bot has by design (headed, in a logged-in session), and
+    pyautogui, which is optional: a machine without it simply logs and
+    carries on rather than failing.
+    """
+    try:
+        import pyautogui
+    except ImportError:
+        log("  pyautogui is not installed on this machine - cannot click the box for real "
+            "(pip install pyautogui).")
+        return False
+    try:
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
+        time.sleep(0.5)
+        box = element.rect
+        window = driver.get_window_position()
+        chrome_height = driver.execute_script("return window.outerHeight - window.innerHeight;")
+        x = window["x"] + box["x"] + box["width"] / 2
+        y = window["y"] + chrome_height + box["y"] + box["height"] / 2
+        log(f"  clicking the checkbox for real at ({x:.0f}, {y:.0f})")
+        pyautogui.moveTo(x, y, duration=random.uniform(0.3, 0.7))
+        pyautogui.click()
+        return True
+    except Exception as e:
+        log(f"  could not click at screen coordinates: {type(e).__name__}: {e}")
+        return False
+
+
+def click_not_a_robot_if_present(driver) -> bool:
+    """Ticks an "I am not a robot" box, if one is on the page.
+
+    Nothing seen so far on this site shows one - the refusals have been 403s
+    on the postback, with no widget to click (2026-10-07) - so this is for the
+    case where that changes. It does nothing at all when no challenge widget
+    is present, which is every run today.
+    """
+    frames = [f for f in driver.find_elements(By.TAG_NAME, "iframe")
+              if any(src in (f.get_attribute("src") or "") for src in CHALLENGE_FRAME_SOURCES)]
+    if not frames:
+        return False
+    log(f"An 'I am not a robot' widget is on the page ({len(frames)} frame(s)) - answering it.")
+    for frame in frames:
+        try:
+            driver.switch_to.frame(frame)
+            box = next((e for selector in CHALLENGE_BOX_SELECTORS
+                        for e in driver.find_elements(By.CSS_SELECTOR, selector)
+                        if e.is_displayed()), None)
+            if box is None:
+                continue
+            try:
+                box.click()      # cheap, and enough for some widgets
+                log("  clicked it through the browser")
+            except Exception:
+                pass
+            driver.switch_to.default_content()
+            _os_click(driver, frame)   # the frame's own position is where the box is
+            return True
+        except Exception as e:
+            log(f"  could not reach the widget: {type(e).__name__}: {e}")
+        finally:
+            driver.switch_to.default_content()
+    return False
+
+
 def _page_snapshot(driver) -> tuple:
     """(title, body), read once. Reading twice is what produced the most
     misleading error this project has seen: the title was matched while the
@@ -1668,6 +1746,12 @@ def run_one(data: dict) -> Path:
     try:
         driver.get(WIZARD_URL)
         time.sleep(3)
+        # Before anything else on the page: if an "I am not a robot" box is
+        # being shown, answer it. Nothing does this today because nothing has
+        # shown one - the refusals are 403s with no widget - but when the site
+        # starts asking, the answer should not be to give up.
+        if click_not_a_robot_if_present(driver):
+            time.sleep(5)
         check_for_block(driver, context="initial page load")
 
         click(driver, "#PassportWizard_portalStep_ApplyButton")
