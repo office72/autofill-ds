@@ -168,16 +168,33 @@ def _load_sheets_backend():
     return sheets_backend
 
 
+def _load_backend(handle: str):
+    """The backend that owns this job's handle. A FormBridge case
+    ("case:<token>") lives behind the platform's API, not in a sheet - asking
+    sheets_backend about it fails, the failure is swallowed, and the row says
+    "done" over an applicant left on Error. Same fresh-import reasoning as
+    _load_sheets_backend: api_backend.py is rewritten into bot_runtime before
+    every job."""
+    if str(handle or "").startswith("case:"):
+        runtime_dir = str(launcher.RUNTIME_DIR)
+        if runtime_dir not in sys.path:
+            sys.path.append(runtime_dir)
+        sys.modules.pop("api_backend", None)
+        import api_backend
+        return api_backend
+    return _load_sheets_backend()
+
+
 def _failed_columns(spreadsheet_id: str) -> list:
     """Every applicant left on Status=Error, whatever the reason."""
     try:
-        sheets_backend = _load_sheets_backend()
-        applicants = sheets_backend.load_all_applicants(spreadsheet_id)
+        backend = _load_backend(spreadsheet_id)
+        applicants = backend.load_all_applicants(spreadsheet_id)
     except Exception as e:
         print(f"[worker_agent] Could not read back the applicants' status: {e}")
         return []
     return [column for column, data in applicants.items()
-            if str(data.get(sheets_backend.STATUS_ROW_LABEL) or "").strip() == "Error"]
+            if str(data.get(backend.STATUS_ROW_LABEL) or "").strip() == "Error"]
 
 
 def _retryable_failed_columns(spreadsheet_id: str) -> list:
