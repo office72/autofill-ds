@@ -269,6 +269,62 @@ def _accept_stray_alert(driver):
         return False
 
 
+# The page is done when: no request in flight (ASP.NET's own flag), the
+# "Loading..." overlay hidden, and the document loaded.
+SETTLE_SCRIPT = """
+if (document.readyState !== 'complete') return false;
+try {
+  if (window.Sys && Sys.WebForms && Sys.WebForms.PageRequestManager &&
+      Sys.WebForms.PageRequestManager.getInstance().get_isInAsyncPostBack()) return false;
+} catch (e) {}
+var p = document.getElementById('updateProgress');
+if (p && getComputedStyle(p).display !== 'none' && p.offsetParent !== null) return false;
+return true;
+"""
+SETTLE_WAIT_SECONDS = float(os.environ.get("AUTOFILL_SETTLE_WAIT", "45"))
+
+
+def wait_until_settled(driver, timeout: float = None) -> list:
+    """Waits for the page to finish what the last click started, pressing OK
+    on any dialog on the way. Returns the dialogs' texts.
+
+    Every answer on this wizard fires a postback that re-renders part of the
+    page. Working on the page while one is in flight is what lost answers,
+    skipped pages and clicked Next on half-loaded pages (2026-10-13, several
+    times). Fixed pauses guessed at how long that takes; this asks the page."""
+    dialogs = []
+    deadline = time.time() + (timeout or SETTLE_WAIT_SECONDS)
+    time.sleep(0.3)  # let the click's own postback begin
+    while True:
+        try:
+            alert = driver.switch_to.alert
+            text = alert.text
+            log(f"DIALOG: {text} - pressing OK")
+            alert.accept()
+            dialogs.append(text)
+            continue
+        except NoAlertPresentException:
+            pass
+        except Exception:
+            pass
+        try:
+            if driver.execute_script(SETTLE_SCRIPT):
+                return dialogs
+        except UnexpectedAlertPresentException:
+            continue
+        except Exception:
+            return dialogs  # mid-navigation - the next find() waits for the page itself
+        if time.time() >= deadline:
+            log(f"Page still loading after {timeout or SETTLE_WAIT_SECONDS:.0f}s - carrying on")
+            return dialogs
+        time.sleep(0.5)
+
+
+def _is_validation_dialog(text: str) -> bool:
+    t = (text or "").lower()
+    return "error on the following field" in t or "required" in t
+
+
 def _collect_visible_validation_errors(driver) -> list:
     """Site-wide pattern confirmed live 2026-08-14: every field on this
     site has its own <span class="invalid_icon"> validation message,
@@ -802,6 +858,7 @@ def select_option(driver, selector, value):
         val = (option.get_attribute("value") or "").strip().lower()
         if target in (text, val):
             sel.select_by_visible_text(option.text)
+            wait_until_settled(driver)
             pause_between_fields()
             return
     # Some dropdowns (e.g. State/Territory of Birth) show options as
@@ -814,6 +871,7 @@ def select_option(driver, selector, value):
         text = option.text.strip().lower()
         if " - " in text and target == text.split(" - ", 1)[1].strip():
             sel.select_by_visible_text(option.text)
+            wait_until_settled(driver)
             pause_between_fields()
             return
     raise NoSuchElementException(
@@ -832,6 +890,7 @@ def check(driver, selector):
             el.click()
 
     _retry_on_stale(_do)
+    wait_until_settled(driver)
     pause_between_fields()
 
 
@@ -1244,6 +1303,24 @@ def _settle_on_step_6_or_later(driver):
     return False
 
 
+def reveal_by_toggle(driver, yes_selector, no_selector, revealed_selector, attempts=3):
+    """Answers Yes and makes sure the follow-up fields really opened.
+
+    Live, 2026-10-13: "Ever married? Yes" sometimes left the spouse fields
+    closed - the postback that opens them was lost. What a person does then
+    works here too: answer No, answer Yes again."""
+    check(driver, yes_selector)
+    for attempt in range(1, attempts + 1):
+        if wait_visible(driver, revealed_selector, timeout=15):
+            return
+        log(f"  {revealed_selector} did not open after Yes - No, then Yes again ({attempt}/{attempts})")
+        check(driver, no_selector)
+        check(driver, yes_selector)
+    if not wait_visible(driver, revealed_selector, timeout=15):
+        raise SeleniumTimeout(f"{revealed_selector} never opened after answering Yes "
+                              f"{attempts + 1} times")
+
+
 def step_parent_spouse(driver, d):
     """DS-11 only - appears whenever there's no valid prior passport to renew
     (every First-time applicant), OR when the site silently upgrades a
@@ -1267,7 +1344,7 @@ def step_parent_spouse(driver, d):
     married = d.get("Ever Married?")
     p = "#PassportWizard_moreAboutYouStep_"
     if is_yes(married):
-        check(driver, p + "marriedList_0")
+        reveal_by_toggle(driver, p + "marriedList_0", p + "marriedList_1", p + "spouseNameTextBox")
         fill_text(driver, p + "spouseNameTextBox", d.get("Spouse First & Middle Name"))
         fill_text(driver, p + "spouseLastNameTextBox", d.get("Spouse Last Name"))
         fill_text(driver, p + "spouseBirthDateTextBox", d.get("Spouse Date of Birth"))
@@ -1280,7 +1357,7 @@ def step_parent_spouse(driver, d):
         # NOTE: divorcedList_0/_1 ids follow the site's consistent Yes/No radio
         # naming pattern but were not directly confirmed in notes.md - verify on first run.
         if is_yes(divorced):
-            check(driver, p + "divorcedList_0")
+            reveal_by_toggle(driver, p + "divorcedList_0", p + "divorcedList_1", p + "divorcedDateTextBox")
             fill_text(driver, p + "divorcedDateTextBox", d.get("Divorce Date"))
         else:
             check(driver, p + "divorcedList_1")
@@ -1434,6 +1511,32 @@ def advance_to(driver, markers, what: str, attempts: int = 3, click=None,
         f"{attempts} attempts. The postback did not take effect. Evidence: {evidence}")
 
 
+PAGE_RETRIES = int(os.environ.get("AUTOFILL_PAGE_RETRIES", "2"))
+
+
+def run_page(driver, step, d, page_markers):
+    """Runs one page's step; if it stops on an error, comes back to the page
+    and does it again.
+
+    After a refused Next or a field that went missing under a re-render: press
+    OK, wait for the page to settle, and look. Still on this page -> fill it
+    again from the top (every filler is safe to repeat: text is cleared and
+    retyped, a checked radio is left alone). On some other page -> the error
+    is not this page's to fix, so it is raised as before."""
+    markers = [page_markers] if isinstance(page_markers, str) else list(page_markers)
+    for attempt in range(1, PAGE_RETRIES + 2):
+        try:
+            return step(driver, d)
+        except (FieldValidationError, SeleniumTimeout, StaleElementReferenceException) as e:
+            wait_until_settled(driver)
+            still_here = any(is_visible(driver, m) for m in markers)
+            if attempt > PAGE_RETRIES or not still_here:
+                raise
+            log(f"{step.__name__} stopped ({type(e).__name__}: {str(e)[:200]}) - "
+                f"still on the same page, filling it again ({attempt}/{PAGE_RETRIES})")
+            pause_between_steps()
+
+
 def step_fees(driver, d):
     log("Step 9: Fees (business rule: Book / Routine / Standard, always)")
     p = "#PassportWizard_feesStep_"
@@ -1537,6 +1640,10 @@ def step_final_print(driver, d, out_path: Path):
 
 def click_next(driver):
     click(driver, NEXT_BUTTON)
+    refused = [t for t in wait_until_settled(driver) if _is_validation_dialog(t)]
+    if refused:
+        # The site would not leave the page. run_page() fills it again.
+        raise FieldValidationError(refused[-1])
     pause_between_steps()
     check_for_block(driver, context="after click_next")
 
@@ -1848,6 +1955,20 @@ def _validate_applicant_data(data: dict):
             )
 
 
+# One field that is on screen only while the wizard is on that page.
+PAGE_MARKERS = {
+    "about_you": "#PassportWizard_aboutYouStep_firstNameTextBox",
+    "address": "#PassportWizard_addressStep_mailStreetTextBox",
+    "travel_plans": "#PassportWizard_travelPlans_TripDateTextBox",
+    "emergency_contact": "#PassportWizard_emergencyContacts_ecNameTextBox",
+    "most_recent_passport": "#PassportWizard_mostRecentPassport_CurrentHaveNone",
+    "parent_spouse": "#PassportWizard_moreAboutYouStep_unknownParent1CheckBox",
+    "other_names": "#PassportWizard_otherNameStep_addOtherFirstTextBox",
+    "review": "#PassportWizard_reviewStep_Label2",
+    "lost_stolen": "#PassportWizard_lostStolenStep_reporterYesRadioButton",
+}
+
+
 def run_one(data: dict) -> Path:
     """Runs the wizard for one already-loaded applicant dict. Returns the
     local (staging) path of the generated PDF - caller uploads it to Drive."""
@@ -1925,27 +2046,27 @@ def run_one(data: dict) -> Path:
         else:
             pause_between_steps()
 
-        step_about_you(driver, data)
-        step_address(driver, data)
-        step_travel_plans(driver, data)
-        step_emergency_contact(driver, data)
-        step_most_recent_passport(driver, data)
-        step_most_recent_passport_continued_if_present(driver, data)
-        step_parent_spouse(driver, data)
-        step_other_names(driver, data)
-        step_review(driver, data)
-        step_lost_stolen_report_if_present(driver, data)
+        run_page(driver, step_about_you, data, PAGE_MARKERS["about_you"])
+        run_page(driver, step_address, data, PAGE_MARKERS["address"])
+        run_page(driver, step_travel_plans, data, PAGE_MARKERS["travel_plans"])
+        run_page(driver, step_emergency_contact, data, PAGE_MARKERS["emergency_contact"])
+        run_page(driver, step_most_recent_passport, data, PAGE_MARKERS["most_recent_passport"])
+        run_page(driver, step_most_recent_passport_continued_if_present, data, STEP_6_PANELS)
+        run_page(driver, step_parent_spouse, data, PAGE_MARKERS["parent_spouse"])
+        run_page(driver, step_other_names, data, PAGE_MARKERS["other_names"])
+        run_page(driver, step_review, data, PAGE_MARKERS["review"])
+        run_page(driver, step_lost_stolen_report_if_present, data, PAGE_MARKERS["lost_stolen"])
         # Parent & Spouse Info can also get triggered by the Lost/Stolen
         # report itself (not just the earlier reasons - book 15+ years old /
         # incorrect data / name changed) - discovered live on 2026-08-05.
         # step_parent_spouse() is already adaptive/idempotent, so calling it
         # again here is a safe no-op if it was already handled earlier.
-        step_parent_spouse(driver, data)
+        run_page(driver, step_parent_spouse, data, PAGE_MARKERS["parent_spouse"])
         # DS-11's step order is Parent&Spouse -> Other Names -> Review, so a
         # late Parent&Spouse trigger re-shows both - both are adaptive, safe
         # no-ops if not actually present.
-        step_other_names(driver, data)
-        step_review(driver, data)
+        run_page(driver, step_other_names, data, PAGE_MARKERS["other_names"])
+        run_page(driver, step_review, data, PAGE_MARKERS["review"])
         step_fees(driver, data)
         step_esignature_if_present(driver, data)
         step_final_print(driver, data, out_path)
