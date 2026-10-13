@@ -32,6 +32,7 @@ Stop with Ctrl+C. Runs forever, checking the queue on an interval.
 import os
 import socket
 import sys
+import random
 import time
 import traceback
 from datetime import datetime, timezone
@@ -52,7 +53,7 @@ POLL_INTERVAL_SECONDS = 20
 # another one is still alive - the row's own timestamp is enough evidence.
 STALE_JOB_TIMEOUT_MINUTES = 45
 
-COLUMNS = ["job_id", "sheet_id", "status", "requested_at", "started_at", "finished_at", "error"]
+COLUMNS = ["job_id", "sheet_id", "status", "requested_at", "started_at", "finished_at", "error", "worker"]
 
 # A failed run is retried automatically, but only when the failure looks
 # transient (anti-bot block, a slow postback, a browser/session crash). A
@@ -93,7 +94,7 @@ def _find_pending_job(sheets):
     values = (
         sheets.spreadsheets()
         .values()
-        .get(spreadsheetId=QUEUE_SPREADSHEET_ID, range=f"{QUEUE_SHEET_NAME}!A2:G")
+        .get(spreadsheetId=QUEUE_SPREADSHEET_ID, range=f"{QUEUE_SHEET_NAME}!A2:H")
         .execute()
         .get("values", [])
     )
@@ -109,7 +110,7 @@ def _reclaim_stale_jobs(sheets):
     values = (
         sheets.spreadsheets()
         .values()
-        .get(spreadsheetId=QUEUE_SPREADSHEET_ID, range=f"{QUEUE_SHEET_NAME}!A2:G")
+        .get(spreadsheetId=QUEUE_SPREADSHEET_ID, range=f"{QUEUE_SHEET_NAME}!A2:H")
         .execute()
         .get("values", [])
     )
@@ -293,6 +294,30 @@ def _heartbeat(sheets, status: str, current_job_id: str = ""):
         ).execute()
 
 
+CLAIM_SETTLE_SECONDS = (2.0, 4.0)
+
+
+def _claim(sheets, row_number: int) -> bool:
+    """Takes a pending job - and makes sure no other machine took it too.
+
+    Every worker polls the same sheet, and a sheet has no lock: two machines
+    reading in the same second would both see "pending" and both run the
+    same client. So each one writes its name on the job, waits a moment and
+    reads the name back. The last name written is the one both read, so
+    exactly one of them goes ahead."""
+    _update_row(sheets, row_number, {"status": "running", "started_at": _now(), "worker": WORKER_ID})
+    time.sleep(random.uniform(*CLAIM_SETTLE_SECONDS))
+    owner = (
+        sheets.spreadsheets().values()
+        .get(spreadsheetId=QUEUE_SPREADSHEET_ID, range=f"{QUEUE_SHEET_NAME}!H{row_number}")
+        .execute().get("values", [[""]])
+    )[0][0]
+    if owner != WORKER_ID:
+        print(f"[worker_agent] Job on row {row_number} was taken by {owner!r} - leaving it.")
+        return False
+    return True
+
+
 def _update_row(sheets, row_number: int, updates: dict):
     data = [
         {"range": f"{QUEUE_SHEET_NAME}!{chr(ord('A') + COLUMNS.index(col))}{row_number}", "values": [[value]]}
@@ -307,6 +332,13 @@ def main_loop():
     sheets = get_sheets_service()
     print(f"[worker_agent] Watching queue every {POLL_INTERVAL_SECONDS}s - Ctrl+C to stop.")
     print(f"[worker_agent] Worker id: {WORKER_ID}")
+    try:  # header for the column that says which machine took each job
+        _update_header = sheets.spreadsheets().values().update(
+            spreadsheetId=QUEUE_SPREADSHEET_ID, range=f"{QUEUE_SHEET_NAME}!H1",
+            valueInputOption="RAW", body={"values": [["worker"]]})
+        _update_header.execute()
+    except Exception:
+        pass
     print(f"[worker_agent] Queue sheet: https://docs.google.com/spreadsheets/d/{QUEUE_SPREADSHEET_ID}")
 
     while True:
@@ -316,7 +348,9 @@ def main_loop():
             row_number, job = _find_pending_job(sheets)
             if job:
                 print(f"[worker_agent] Picked up job '{job['job_id']}' -> sheet {job['sheet_id']}")
-                _update_row(sheets, row_number, {"status": "running", "started_at": _now()})
+                if not _claim(sheets, row_number):
+                    time.sleep(POLL_INTERVAL_SECONDS)
+                    continue
                 _heartbeat(sheets, "busy", job["job_id"])
                 try:
                     status, error = _run_with_retries(sheets, row_number, job)
