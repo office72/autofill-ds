@@ -1673,8 +1673,104 @@ def step_final_print(driver, d, out_path: Path):
     log(f"Saved PDF to {out_path}")
 
 
+# Marks the moment the page starts sending anything: an ASP.NET partial
+# postback (beginRequest), a form submit, or leaving the page. A full page load
+# wipes the window, so a flag that is gone also means "it went".
+ARM_POSTED_SCRIPT = """
+window.__fbPosted = false;
+try {
+  if (!window.__fbHooked) {
+    Sys.WebForms.PageRequestManager.getInstance().add_beginRequest(function () { window.__fbPosted = true; });
+    window.__fbHooked = true;
+  }
+} catch (e) {}
+if (!window.__fbUnloadHooked) {
+  window.addEventListener('beforeunload', function () { window.__fbPosted = true; });
+  window.__fbUnloadHooked = true;
+}
+"""
+POSTED_SCRIPT = "return window.__fbPosted !== false;"
+PRESS_CONFIRM_SECONDS = float(os.environ.get("AUTOFILL_PRESS_CONFIRM", "8"))
+
+
+def _selenium_click(driver, selector):
+    find(driver, selector, EC.element_to_be_clickable).click()
+
+
+def _js_click(driver, selector):
+    el = find(driver, selector)
+    driver.execute_script("arguments[0].scrollIntoView({block: 'center'}); arguments[0].click();", el)
+
+
+def _mouse_click(driver, selector):
+    """A real mouse click from the operating system - what a person does."""
+    try:
+        import pyautogui
+    except ImportError:
+        raise RuntimeError("pyautogui is not installed")
+    el = find(driver, selector)
+    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
+    time.sleep(0.5)
+    box = driver.execute_script(
+        "var r = arguments[0].getBoundingClientRect();"
+        "return {x: r.left + r.width / 2, y: r.top + r.height / 2,"
+        " top: window.outerHeight - window.innerHeight};", el)
+    window = driver.get_window_position()
+    x, y = window["x"] + box["x"], window["y"] + box["top"] + box["y"]
+    pyautogui.moveTo(x, y, duration=random.uniform(0.3, 0.7))
+    pyautogui.click()
+
+
+PRESS_METHODS = (("click", _selenium_click), ("script click", _js_click), ("mouse click", _mouse_click))
+
+
+def _posted(driver) -> bool:
+    try:
+        return bool(driver.execute_script(POSTED_SCRIPT))
+    except UnexpectedAlertPresentException:
+        return True   # a dialog answered the click - wait_until_settled() reads it
+    except Exception:
+        return True   # the page is going away - that is a response too
+
+
+def press(driver, selector, what="the button"):
+    """Clicks a wizard button and makes sure the click was taken.
+
+    Live, 2026-10-13: Next on Other Names and on Fees was "clicked", nothing
+    happened, and a person's click on the same button went through. A click
+    that the page ignores looks exactly like a slow page, so the bot waited a
+    minute and "clicked again" the same ignored way. Now: after each click,
+    look for the page starting to send. Nothing within a few seconds -> the
+    click did not land, so the next way of clicking is tried (script click,
+    then a real mouse click). Safe for Finish too: a second click is only
+    made when the first one demonstrably sent nothing."""
+    for name, method in PRESS_METHODS:
+        try:
+            driver.execute_script(ARM_POSTED_SCRIPT)
+        except Exception:
+            pass
+        try:
+            method(driver, selector)
+        except UnexpectedAlertPresentException:
+            return
+        except Exception as e:
+            log(f"  {what}: {name} failed ({type(e).__name__}: {str(e)[:120]}) - trying the next way")
+            continue
+        deadline = time.time() + PRESS_CONFIRM_SECONDS
+        while True:
+            if _posted(driver):
+                return
+            if time.time() >= deadline:
+                break
+            time.sleep(0.5)
+        log(f"  {what}: the {name} was not taken by the page (nothing was sent) - trying the next way")
+    raise SeleniumTimeout(f"The page did not respond to any click on {what} - "
+                          "not a normal click, not a script click, not a mouse click.")
+
+
 def click_next(driver):
-    click(driver, NEXT_BUTTON)
+    wait_until_settled(driver)  # never click into a request still in flight
+    press(driver, NEXT_BUTTON, "Next")
     refused = [t for t in wait_until_settled(driver) if _is_validation_dialog(t)]
     if refused:
         # The site would not leave the page. run_page() fills it again.
@@ -1684,7 +1780,8 @@ def click_next(driver):
 
 
 def click_finish(driver):
-    click(driver, FINISH_BUTTON)
+    wait_until_settled(driver)
+    press(driver, FINISH_BUTTON, "Finish")
     refused = [t for t in wait_until_settled(driver, timeout=FINISH_WAIT_SECONDS)
                if _is_validation_dialog(t)]
     if refused:

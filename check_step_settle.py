@@ -17,6 +17,7 @@ import run_autofill  # noqa: E402
 
 run_autofill.STEP_ADVANCE_WAIT_SECONDS = 30
 run_autofill.check_for_block = lambda driver, context="": None
+run_autofill._record_block = lambda context, detail: None  # never write test rows to the live Blocks tab
 run_autofill.log = lambda *a, **k: None
 
 failures = []

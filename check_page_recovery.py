@@ -22,6 +22,7 @@ run_autofill.log = lambda *a, **k: None
 run_autofill.pause_between_steps = lambda: None
 run_autofill.pause_between_fields = lambda: None
 run_autofill.check_for_block = lambda driver, context="": None
+run_autofill._record_block = lambda context, detail: None  # never write test rows to the live Blocks tab
 
 clock = {"t": 0.0}
 time.time = lambda: clock["t"]
@@ -82,8 +83,11 @@ run_autofill.wait_until_settled(page, timeout=20)
 check("  a page that never settles is given up on, not waited on forever", clock["t"] < 30, True)
 
 # --- refused Next -> the same page again -----------------------------------
-run_autofill.click = lambda d, sel: None
-refusing = Page(alerts=["There is an error on the following field(s): Required"])
+REAL_PRESS = run_autofill.press
+# the site's answer to the click comes after the click
+run_autofill.press = lambda d, sel, what="": d.alerts.extend(getattr(d, "answer", []))
+refusing = Page()
+refusing.answer = ["There is an error on the following field(s): Required"]
 try:
     run_autofill.click_next(refusing)
     got = "no error"
@@ -143,6 +147,51 @@ clicked.clear()
 opened["after"] = 1
 run_autofill.reveal_by_toggle(Page(), "yes", "no", "#spouse")
 check("  fields that opened at once: just Yes", clicked, ["yes"])
+
+# --- a click the page ignores is tried another way (live, 2026-10-13) ---
+run_autofill.press = REAL_PRESS
+
+
+class IgnoresClicks(Page):
+    """Takes a click only from the methods named in `takes`."""
+    def __init__(self, takes):
+        super().__init__()
+        self.takes, self.tried, self.flag = takes, [], True
+
+    def execute_script(self, script, *args):
+        if "__fbPosted = false" in script:
+            self.flag = False
+            return None
+        if "__fbPosted !== false" in script:
+            return self.flag
+        return True
+
+
+def method(name):
+    def go(d, sel):
+        d.tried.append(name)
+        if name in d.takes:
+            d.flag = True
+    return go
+
+
+run_autofill.PRESS_METHODS = tuple((n, method(n)) for n in ("click", "script click", "mouse click"))
+page = IgnoresClicks(takes={"click"})
+run_autofill.press(page, "#next")
+check("a click the page takes is made once", page.tried, ["click"])
+page = IgnoresClicks(takes={"script click"})
+run_autofill.press(page, "#next")
+check("  an ignored click is followed by a script click", page.tried, ["click", "script click"])
+page = IgnoresClicks(takes={"mouse click"})
+run_autofill.press(page, "#finish")
+check("  and then by a real mouse click", page.tried, ["click", "script click", "mouse click"])
+page = IgnoresClicks(takes=set())
+try:
+    run_autofill.press(page, "#next")
+    got = "no error"
+except run_autofill.SeleniumTimeout:
+    got = "raised"
+check("  a page that takes no click at all is reported", got, "raised")
 
 # --- other names: added once, and again if the list lost it (live, 2026-10-13) ---
 class NamesPage(Page):
