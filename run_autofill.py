@@ -988,6 +988,7 @@ def step_most_recent_passport(driver, d):
     if scenario.startswith("First-time"):
         check(driver, p + "CurrentHaveNone")
         click_next(driver)
+        _advance_past_most_recent_passport(driver)
         return
 
     if scenario not in BOOK_POSSESSION_IDS:
@@ -1040,6 +1041,16 @@ def step_most_recent_passport(driver, d):
     fill_text(driver, p + "ExistingBookNumber", d.get("Book Number"))
 
     click_next(driver)
+    _advance_past_most_recent_passport(driver)
+
+
+def _advance_past_most_recent_passport(driver):
+    """Next on the passport-details page must really leave it. Live,
+    2026-10-13: it did not, silently; every step after it then looked for its
+    own page, found nothing, and the run sat waiting until a person clicked
+    Next by hand. Arrived = any page that can follow this one."""
+    advance_to(driver, STEP_6_PANELS + LATER_STEP_MARKERS + FEE_PAGE_MARKERS,
+               "the page after the most recent passport")
 
 
 INCORRECT_FIELD_IDS = {
@@ -1064,6 +1075,12 @@ def step_most_recent_passport_continued_if_present(driver, d):
     still-unanswered Name-Changed radio buttons - which then silently stuck
     the wizard on this page while later step functions ran blind against a
     page they weren't actually on. Check each sub-question independently."""
+    # Wait for the wizard to land - on this page or on any later one - before
+    # deciding whether this page is here. Live, 2026-10-13: this page loaded
+    # slowly, the one-shot check below came back empty, the step was skipped
+    # unanswered and without Next, and the run sat here until a person
+    # clicked Next by hand - with the name-change answers never given.
+    _settle_on_step_6_or_later(driver)
     has_data_incorrect_q = count(driver, "#PassportWizard_mostRecentPassportContinued_DataIncorrectButtonsPanel") > 0
     has_name_changed_q = count(driver, "#PassportWizard_mostRecentPassportContinued_NameChangedButtonsPanel") > 0
     if not has_data_incorrect_q and not has_name_changed_q:
@@ -1205,6 +1222,25 @@ def _settle_on_a_later_step(driver):
         check_for_block(driver, context="waiting for the page after the passport details")
         time.sleep(2)
     log("No known page appeared after the passport details - continuing to look step by step")
+    return False
+
+
+STEP_6_PANELS = ("#PassportWizard_mostRecentPassportContinued_DataIncorrectButtonsPanel",
+                 "#PassportWizard_mostRecentPassportContinued_NameChangedButtonsPanel")
+
+
+def _settle_on_step_6_or_later(driver):
+    """Waits until this page's questions are in the page, or a later page is
+    on screen. Same reason as _settle_on_a_later_step, one page earlier."""
+    deadline = time.time() + STEP_ADVANCE_WAIT_SECONDS
+    while time.time() < deadline:
+        if any(count(driver, m) > 0 for m in STEP_6_PANELS):
+            return True
+        if any(is_visible(driver, m) for m in LATER_STEP_MARKERS + FEE_PAGE_MARKERS):
+            return True
+        check_for_block(driver, context="waiting for the page after the most recent passport")
+        time.sleep(2)
+    log("Neither the passport-continued page nor a later one appeared - continuing to look step by step")
     return False
 
 

@@ -71,6 +71,67 @@ check("on the Review page instead, the parents step stands aside",
       run("#PassportWizard_reviewStep_Label2", 5), [])
 check("with no known page in time, it gives up waiting and stands aside", run("#nothing", 0), [])
 
+# --- one page earlier: "most recent passport (continued)" (live, 2026-10-13) ---
+STEP6 = "#PassportWizard_mostRecentPassportContinued_NameChangedButtonsPanel"
+
+
+def run_step6(page, delay):
+    global driver
+    driver = SlowPage(page, delay)
+    clock["t"] = 0.0
+
+    def sleep(s):
+        clock["t"] += s
+        driver.now = clock["t"]
+    time.sleep = sleep
+    run_autofill.is_visible = lambda d, sel: d.visible(sel)
+    run_autofill.count = lambda d, sel: 1 if d.visible(sel) else 0
+    done = []
+    run_autofill.check = lambda d, sel: done.append(sel.rsplit("_", 1)[-1])
+    run_autofill.click_next = lambda d: done.append("next")
+    run_autofill.fill_text = lambda d, sel, v: None
+    run_autofill.wait_visible = lambda d, sel, timeout=None: None
+    run_autofill.check_and_confirm = lambda d, sel: done.append(sel.rsplit("_", 1)[-1])
+    try:
+        run_autofill.step_most_recent_passport_continued_if_present(driver, {"Name Changed?": "No"})
+    except Exception as e:  # the rest of the step needs a real page; what matters is that it started
+        done.append(type(e).__name__)
+    return done
+
+
+got = run_step6(STEP6, 12)
+check("a passport-continued page that takes 12s is waited for and answered",
+      "nameChangeNone" in got, True)
+check("  a later page already there means this one is not coming",
+      run_step6("#PassportWizard_moreAboutYouStep_unknownParent1CheckBox", 0), [])
+
+# --- leaving the passport-details page: Next that did not take is clicked again ---
+clicks = {"n": 0}
+
+
+class StuckThenMoves:
+    def visible(self, selector):
+        return clicks["n"] >= 2 and selector == STEP6
+
+
+driver = StuckThenMoves()
+clock["t"] = 0.0
+time.sleep = lambda s: clock.__setitem__("t", clock["t"] + s)
+run_autofill.is_visible = lambda d, sel: d.visible(sel)
+run_autofill.pause_between_steps = lambda: None
+run_autofill._postback_evidence = lambda d: ""
+run_autofill._record_block = lambda c, d: None
+
+
+def next_click(d):
+    clicks["n"] += 1
+
+
+run_autofill.click_next = next_click
+next_click(driver)  # the click the step itself made
+run_autofill._advance_past_most_recent_passport(driver)
+check("a Next that did not take on the passport-details page is clicked again", clicks["n"], 2)
+
 print()
 if failures:
     print(f"{len(failures)} FAILED")
