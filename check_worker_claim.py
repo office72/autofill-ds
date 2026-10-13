@@ -83,6 +83,34 @@ sheet = FakeSheet()
 worker_agent.time.sleep = lambda s: setattr(sheet, "worker", "CONTABO")
 check("a machine that was overtaken during the wait leaves the job", worker_agent._claim(sheet, 5), False)
 
+# --- taking turns: the idle machine that waited longest goes first ---
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+NOW = datetime(2026, 10, 13, 21, 0, tzinfo=timezone.utc)
+
+
+def ago(minutes):
+    return (NOW - timedelta(minutes=minutes)).isoformat(timespec="seconds")
+
+
+def ran(worker, minutes_ago):
+    return ["id", "case:x", "done", ago(minutes_ago + 1), ago(minutes_ago), ago(minutes_ago - 5), "", worker]
+
+
+three = [["CONTABO", ago(0.2), "idle", ""], ["OFFICE-PC", ago(0.3), "idle", ""], ["LAPTOP", ago(0.5), "idle", ""]]
+history = [ran("CONTABO", 60), ran("OFFICE-PC", 30), ran("LAPTOP", 45)]
+check("the machine whose last job is oldest goes next",
+      worker_agent.whose_turn(history, three, NOW), "CONTABO")
+check("  a machine that never ran a job goes before all of them",
+      worker_agent.whose_turn(history, three + [["NEW-PC", ago(0.1), "idle", ""]], NOW), "NEW-PC")
+check("  a busy machine is skipped",
+      worker_agent.whose_turn(history, [["CONTABO", ago(0.2), "busy", "j"]] + three[1:], NOW), "LAPTOP")
+check("  a machine not seen for minutes is skipped",
+      worker_agent.whose_turn(history, [["CONTABO", ago(10), "idle", ""]] + three[1:], NOW), "LAPTOP")
+check("  after it runs, the turn moves on",
+      worker_agent.whose_turn(history + [ran("CONTABO", 1)], three, NOW), "LAPTOP")
+check("  no machine online: nobody's turn", worker_agent.whose_turn(history, [], NOW), "")
+
 print()
 if failures:
     print(f"{len(failures)} FAILED")

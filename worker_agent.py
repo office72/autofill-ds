@@ -296,6 +296,57 @@ def _heartbeat(sheets, status: str, current_job_id: str = ""):
 
 CLAIM_SETTLE_SECONDS = (2.0, 4.0)
 
+# Taking turns (user, 2026-10-13: "give every machine a chance"). Among the
+# machines that are online and idle, the one whose last job started longest
+# ago - or that never ran one - goes first. If it has not taken the job after
+# this long (asleep, slow poll, an older worker_agent), anyone may.
+TURN_GRACE_SECONDS = 90
+
+
+def whose_turn(queue_rows: list, worker_rows: list, now: datetime) -> str:
+    """The idle, online machine that has waited longest for a job."""
+    online = []
+    for w in worker_rows:
+        w = list(w) + [""] * (4 - len(w))
+        try:
+            seen = datetime.fromisoformat(w[1])
+        except ValueError:
+            continue
+        if w[0] and w[2] == "idle" and (now - seen).total_seconds() <= WORKER_OFFLINE_AFTER_MINUTES * 60:
+            online.append(w[0])
+    if not online:
+        return ""
+    last_start = {}
+    for r in queue_rows:
+        r = list(r) + [""] * (len(COLUMNS) - len(r))
+        job = dict(zip(COLUMNS, r))
+        if job["worker"] and job["started_at"] > last_start.get(job["worker"], ""):
+            last_start[job["worker"]] = job["started_at"]
+    return min(online, key=lambda name: (last_start.get(name, ""), name))
+
+
+def _my_turn(sheets, job: dict) -> bool:
+    try:
+        requested = datetime.fromisoformat(job["requested_at"])
+        if (datetime.now(timezone.utc) - requested).total_seconds() > TURN_GRACE_SECONDS:
+            return True   # the machine whose turn it was did not come for it
+    except ValueError:
+        return True
+    ranges = (
+        sheets.spreadsheets().values()
+        .batchGet(spreadsheetId=QUEUE_SPREADSHEET_ID,
+                  ranges=[f"{QUEUE_SHEET_NAME}!A2:H", f"{WORKERS_SHEET_NAME}!A2:D"])
+        .execute().get("valueRanges", [])
+    )
+    queue_rows = ranges[0].get("values", []) if ranges else []
+    worker_rows = ranges[1].get("values", []) if len(ranges) > 1 else []
+    turn = whose_turn(queue_rows, worker_rows, datetime.now(timezone.utc))
+    if turn and turn != WORKER_ID:
+        print(f"[worker_agent] Job waiting - it is {turn}'s turn; taking it only if {turn} "
+              f"has not within {TURN_GRACE_SECONDS}s.")
+        return False
+    return True
+
 
 def _claim(sheets, row_number: int) -> bool:
     """Takes a pending job - and makes sure no other machine took it too.
@@ -346,6 +397,8 @@ def main_loop():
             _heartbeat(sheets, "idle")
             _reclaim_stale_jobs(sheets)
             row_number, job = _find_pending_job(sheets)
+            if job and not _my_turn(sheets, job):
+                job = None
             if job:
                 print(f"[worker_agent] Picked up job '{job['job_id']}' -> sheet {job['sheet_id']}")
                 if not _claim(sheets, row_number):
