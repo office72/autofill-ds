@@ -1177,6 +1177,37 @@ def _fill_parent(driver, d, n: int):
     check(driver, p + "CitizenList_0" if is_yes(citizen) else p + "CitizenList_1")
 
 
+# Every page that can come after "most recent passport (continued)". The
+# optional steps below decide "am I on this page?" by looking for it - which
+# is only safe once the wizard has finished moving to SOME page.
+LATER_STEP_MARKERS = (
+    "#PassportWizard_moreAboutYouStep_unknownParent1CheckBox",   # parents & spouse (DS-11)
+    "#PassportWizard_otherNameStep_addOtherFirstTextBox",        # other names
+    "#PassportWizard_reviewStep_Label2",                         # review
+    "#PassportWizard_lostStolenStep_reporterYesRadioButton",     # lost / stolen report
+)   # plus the Fees page, added at call time (FEE_PAGE_MARKERS is defined below)
+
+
+def _settle_on_a_later_step(driver):
+    """Waits until one of the known later pages is actually on screen.
+
+    Found live 2026-10-13: the parents page loaded slowly, the one-shot check
+    for it came back empty, the bot concluded "not the DS-11 path", skipped
+    the step and clicked Next on the still-empty parents page - "Required".
+    A wait that ends on ANY known page fixes the race without guessing which
+    page is coming. If none appears in time, carry on as before: the steps
+    look for themselves, and advance_to() reports a stall further on."""
+    markers = LATER_STEP_MARKERS + FEE_PAGE_MARKERS
+    deadline = time.time() + STEP_ADVANCE_WAIT_SECONDS
+    while time.time() < deadline:
+        if any(is_visible(driver, m) for m in markers):
+            return True
+        check_for_block(driver, context="waiting for the page after the passport details")
+        time.sleep(2)
+    log("No known page appeared after the passport details - continuing to look step by step")
+    return False
+
+
 def step_parent_spouse(driver, d):
     """DS-11 only - appears whenever there's no valid prior passport to renew
     (every First-time applicant), OR when the site silently upgrades a
@@ -1187,6 +1218,7 @@ def step_parent_spouse(driver, d):
     Validity renewal with no parent step still printed a DS-5504, not a
     DS-82 - don't assume which non-DS-11 form resulted, we only know it's
     not the DS-11/parent-info path."""
+    _settle_on_a_later_step(driver)
     if count(driver, "#PassportWizard_moreAboutYouStep_unknownParent1CheckBox") == 0:
         log("Parent & Spouse Info step did not appear - not the DS-11 path (could be DS-82 or DS-5504)")
         return
@@ -1230,6 +1262,7 @@ def step_other_names(driver, d):
     # but this function also gets called from a spot that may not actually
     # be on this step at all in that case, so check presence first rather
     # than blindly clicking Next wherever we happen to be.
+    _settle_on_a_later_step(driver)
     if count(driver, p + "addOtherFirstTextBox") == 0:
         return
     log("Step 7: Other Names")
@@ -1250,6 +1283,7 @@ def step_review(driver, d):
     # Adaptive: DS-11's step order re-visits Review a second time after a
     # late Parent & Spouse Info trigger (e.g. from the Lost/Stolen report) -
     # see step_other_names() for the same pattern.
+    _settle_on_a_later_step(driver)
     if count(driver, "#PassportWizard_reviewStep_Label2") == 0:
         return
     log("Step 8: Review")
