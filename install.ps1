@@ -73,7 +73,7 @@ Write-Host "Installing required Python packages (this can take a few minutes the
 
 # --- 3. Copy the shell files (launcher.py, launcher_url.py, register_protocol.py,
 #         service_account.json) into the install directory ---
-$FilesToInstall = @("launcher.py", "launcher_url.py", "register_protocol.py", "service_account.json")
+$FilesToInstall = @("launcher.py", "launcher_url.py", "register_protocol.py", "service_account.json", "worker_agent.py", "extract_client_intake.py")
 foreach ($f in $FilesToInstall) {
     Copy-Item -Path "$ScriptDir\$f" -Destination "$InstallDir\$f" -Force
 }

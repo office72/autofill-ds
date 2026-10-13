@@ -33,6 +33,10 @@ FILES = [
     "register_protocol.py",
     "requirements.txt",
     "service_account.json",
+    # A machine that takes FormBridge cases from the run queue (2026-10-13):
+    # the worker and the one helper it borrows for its Sheets connection.
+    "worker_agent.py",
+    "extract_client_intake.py",
 ]
 
 README = """American Docs - Autofill Bot - Installation
