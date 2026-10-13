@@ -144,6 +144,32 @@ opened["after"] = 1
 run_autofill.reveal_by_toggle(Page(), "yes", "no", "#spouse")
 check("  fields that opened at once: just Yes", clicked, ["yes"])
 
+# --- other names: added once, and again if the list lost it (live, 2026-10-13) ---
+class NamesPage(Page):
+    def __init__(self, drop_first_add):
+        super().__init__()
+        self.listed, self.adds, self.drop = [], 0, drop_first_add
+
+    def execute_script(self, script, *args):
+        if "innerText" in script:
+            return "Other names " + " ".join(self.listed)
+        return True
+
+
+def fake_click(d, sel):
+    d.adds += 1
+    if not (d.drop and d.adds == 1):
+        d.listed.append("MOSHE KATZ")
+
+
+run_autofill.fill_text = lambda d, sel, v: None
+run_autofill.click = fake_click
+names = NamesPage(drop_first_add=True)
+run_autofill.add_other_name(names, "Moshe", "Katz")
+check("a name the list lost is added again", (names.adds, names.listed), (2, ["MOSHE KATZ"]))
+run_autofill.add_other_name(names, "Moshe", "Katz")
+check("  a name already listed is not added twice (page filled again)", names.adds, 2)
+
 print()
 if failures:
     print(f"{len(failures)} FAILED")

@@ -60,13 +60,20 @@ def run(page, delay):
     run_autofill.check = lambda d, sel: None
     run_autofill.fill_text = lambda d, sel, v: None
     run_autofill.click_next = lambda d: filled.append("next")
-    run_autofill.step_parent_spouse(driver, {"Ever Married?": "No"})
+    run_autofill.advance_to = lambda d, markers, what, **k: filled.append("left")
+    try:
+        run_autofill.step_parent_spouse(driver, {"Ever Married?": "No"})
+    finally:
+        run_autofill.advance_to = REAL_ADVANCE_TO
     return filled
 
 
+REAL_ADVANCE_TO = run_autofill.advance_to
+
+
 PARENTS = "#PassportWizard_moreAboutYouStep_unknownParent1CheckBox"
-check("a parents page that takes 10s is waited for and filled", run(PARENTS, 10), [1, 2, "next"])
-check("a parents page already there is filled at once", run(PARENTS, 0), [1, 2, "next"])
+check("a parents page that takes 10s is waited for and filled", run(PARENTS, 10), [1, 2, "next", "left"])
+check("a parents page already there is filled at once", run(PARENTS, 0), [1, 2, "next", "left"])
 check("on the Review page instead, the parents step stands aside",
       run("#PassportWizard_reviewStep_Label2", 5), [])
 check("with no known page in time, it gives up waiting and stands aside", run("#nothing", 0), [])

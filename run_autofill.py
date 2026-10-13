@@ -1365,6 +1365,8 @@ def step_parent_spouse(driver, d):
         check(driver, p + "marriedList_1")
 
     click_next(driver)
+    advance_to(driver, (PAGE_MARKERS["other_names"], PAGE_MARKERS["review"], PAGE_MARKERS["lost_stolen"])
+               + FEE_PAGE_MARKERS, "the page after Parents & Spouse")
 
 
 def step_other_names(driver, d):
@@ -1384,12 +1386,43 @@ def step_other_names(driver, d):
         first = d.get(f"Other Name {i} - First")
         last = d.get(f"Other Name {i} - Last")
         if first or last:
-            fill_text(driver, p + "addOtherFirstTextBox", first)
-            fill_text(driver, p + "addOtherLastTextBox", last)
-            click(driver, p + "addButton")
-            pause_between_fields()
+            add_other_name(driver, first, last)
 
     click_next(driver)
+    advance_to(driver, (PAGE_MARKERS["review"], PAGE_MARKERS["lost_stolen"]) + FEE_PAGE_MARKERS,
+               "the page after Other Names")
+
+
+def _name_listed(driver, first, last) -> bool:
+    """Is this name already in the page's list of other names? innerText
+    leaves out what is typed in the boxes, so only the added rows count."""
+    try:
+        text = re.sub(r"\s+", " ", driver.execute_script("return document.body.innerText") or "").upper()
+    except Exception:
+        return False
+    want = " ".join(str(x).strip().upper() for x in (first, last) if x and str(x).strip())
+    return bool(want) and want in text
+
+
+def add_other_name(driver, first, last, attempts=2):
+    """Live, 2026-10-13: names typed here did not stay - the Add postback was
+    still running when the next name was typed, and the list came back
+    without them. Add, wait for the page, check the name is listed. Safe to
+    repeat: a name already listed is not added again."""
+    p = "#PassportWizard_otherNameStep_"
+    for attempt in range(1, attempts + 1):
+        if _name_listed(driver, first, last):
+            return
+        fill_text(driver, p + "addOtherFirstTextBox", first)
+        fill_text(driver, p + "addOtherLastTextBox", last)
+        click(driver, p + "addButton")
+        wait_until_settled(driver)
+        pause_between_fields()
+        if _name_listed(driver, first, last):
+            return
+        log(f"  other name was not added to the list - adding again ({attempt}/{attempts})")
+    raise SeleniumTimeout("An other name would not stay in the list after "
+                          f"{attempts} tries - check the debug screenshot.")
 
 
 def step_review(driver, d):
@@ -1401,6 +1434,8 @@ def step_review(driver, d):
         return
     log("Step 8: Review")
     click_next(driver)
+    advance_to(driver, (PAGE_MARKERS["lost_stolen"], PAGE_MARKERS["parent_spouse"]) + FEE_PAGE_MARKERS,
+               "the page after Review")
 
 
 def _log_fees_page(driver):
@@ -1650,6 +1685,11 @@ def click_next(driver):
 
 def click_finish(driver):
     click(driver, FINISH_BUTTON)
+    refused = [t for t in wait_until_settled(driver, timeout=FINISH_WAIT_SECONDS)
+               if _is_validation_dialog(t)]
+    if refused:
+        # Refused in the browser, before anything was sent - not a submission.
+        raise FieldValidationError(refused[-1])
     pause_between_steps()
     check_for_block(driver, context="after click_finish")
 
@@ -2067,7 +2107,7 @@ def run_one(data: dict) -> Path:
         # no-ops if not actually present.
         run_page(driver, step_other_names, data, PAGE_MARKERS["other_names"])
         run_page(driver, step_review, data, PAGE_MARKERS["review"])
-        step_fees(driver, data)
+        run_page(driver, step_fees, data, FEE_PAGE_MARKERS)
         step_esignature_if_present(driver, data)
         step_final_print(driver, data, out_path)
     except Exception as e:
