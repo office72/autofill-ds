@@ -78,8 +78,11 @@ WORKERS_SHEET_NAME = "Workers"
 WORKER_COLUMNS = ["worker_id", "last_seen", "status", "current_job_id"]
 # Hostname, not something hand-configured per machine - Contabo and this
 # local test box already have different hostnames, so every worker gets a
-# distinct identity for free with zero setup.
-WORKER_ID = socket.gethostname()
+# distinct identity for free with zero setup. AUTOFILL_WORKER_NAME overrides
+# it for a second worker on the same machine (its own copy of the install
+# folder, so its own Chrome profile and lock) - two workers under one name
+# would both think they had claimed the same job (user, 2026-10-26).
+WORKER_ID = os.environ.get("AUTOFILL_WORKER_NAME", "").strip() or socket.gethostname()
 # A control panel reading this tab treats a worker as offline once last_seen
 # is older than this - comfortably more than one poll interval so a single
 # slow cycle doesn't look like an outage.
