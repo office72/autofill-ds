@@ -1058,6 +1058,11 @@ def _state_list_matches(driver, state_selector, usa: bool) -> bool:
     return enabled if usa else not enabled
 
 
+# State lists that did not follow their country, to be fixed with the
+# Process button once the rest of the page is filled - see select_country().
+_PENDING_STATE_LISTS = []
+
+
 def select_country(driver, country_selector, state_selector, process_selector,
                    country, state=None):
     """Picks a country and, for the US, the state.
@@ -1065,39 +1070,68 @@ def select_country(driver, country_selector, state_selector, process_selector,
     Since the 2026-11 redesign the state list next to each country does not
     always follow the country by itself: with ISRAEL picked it can stay
     "required" until the small "Process" button beside it is pressed (seen
-    by hand on About the Applicant). Press it only when the list is wrong
-    for the country, so pages that already update by themselves are left
-    alone."""
+    by hand on About the Applicant, and failing a real client's Address page
+    on 2026-11-10). Pages that update by themselves are left alone; for the
+    others the press waits for fix_pending_state_lists(), right before Next.
+
+    Why not press it at once (tried, 2026-11-10): Process posts the whole
+    page and validates it on the server, so pressing it half-filled had the
+    server flag the still-empty fields below (EC phone -> "Required") and the
+    real client's run failed one page later. A person presses it last."""
     select_option(driver, country_selector, country)
     if not country or not str(country).strip():
         return
     usa = country_is_usa(country)
     wait_until_settled(driver)
-    for attempt in (1, 2):
-        if _state_list_matches(driver, state_selector, usa):
-            break
-        buttons = driver.find_elements(By.CSS_SELECTOR, css(process_selector))
-        if not buttons:
-            break
-        log(f"  state list did not follow the country ({country}) - pressing Process ({attempt}/2)")
-        if attempt == 1:
-            driver.execute_script("arguments[0].click();", buttons[0])
-        else:
-            # The button validates the whole page first, so a still-empty
-            # field further down (SSN, phone...) cancels the click. Post back
-            # for the button directly, the way its own onclick ends up doing.
-            driver.execute_script("__doPostBack(arguments[0].name, '');", buttons[0])
-        time.sleep(1)
-        wait_until_settled(driver)
-        pause_between_fields()
+    if _state_list_matches(driver, state_selector, usa):
+        if usa:
+            select_option(driver, state_selector, state)
+        return
+    log(f"  state list did not follow the country ({country}) - Process will be pressed before Next")
+    _PENDING_STATE_LISTS.append((state_selector, process_selector, country, state))
+
+
+def _press_process(driver, button, direct: bool):
+    """Presses Process and waits for the page it brings back."""
+    if direct:
+        # The button validates the whole page first; if that cancels the
+        # click, post back for the button directly, as its onclick would.
+        driver.execute_script("__doPostBack(arguments[0].name, '');", button)
     else:
-        log(f"  state list still does not match {country} after Process - carrying on")
-    if usa:
-        select_option(driver, state_selector, state)
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'}); arguments[0].click();", button)
+    try:
+        WebDriverWait(driver, 15).until(EC.staleness_of(button))
+    except SeleniumTimeout:
+        pass   # an async postback may keep the button; settling covers it
+    time.sleep(1)
+    wait_until_settled(driver)
+    pause_between_fields()
+
+
+def fix_pending_state_lists(driver):
+    """Runs right before Next on a page with countries: presses Process for
+    any state list that did not follow its country, then picks the US state."""
+    pending = list(_PENDING_STATE_LISTS)
+    _PENDING_STATE_LISTS.clear()
+    for state_selector, process_selector, country, state in pending:
+        usa = country_is_usa(country)
+        for attempt in (1, 2):
+            if _state_list_matches(driver, state_selector, usa):
+                break
+            buttons = driver.find_elements(By.CSS_SELECTOR, css(process_selector))
+            if not buttons:
+                break
+            log(f"  pressing Process for {country} ({attempt}/2)")
+            _press_process(driver, buttons[0], direct=(attempt == 2))
+        else:
+            log(f"  state list still does not match {country} after Process - carrying on")
+        if usa:
+            select_option(driver, state_selector, state)
 
 
 def step_about_you(driver, d):
     log("Step 1: About You")
+    _PENDING_STATE_LISTS.clear()   # nothing left over from a failed earlier try
     p = "#PassportWizard_aboutYouStep_"
     fill_text(driver, p + "firstNameTextBox", d.get("First Name"))
     fill_text(driver, p + "middleNameTextBox", d.get("Middle Name"))
@@ -1123,11 +1157,13 @@ def step_about_you(driver, d):
     fill_text(driver, p + "occupationTextBox", d.get("Occupation"))
     fill_text(driver, p + "employerTextBox", d.get("Employer"))
 
+    fix_pending_state_lists(driver)
     click_next(driver)
 
 
 def step_address(driver, d):
     log("Step 2: Address")
+    _PENDING_STATE_LISTS.clear()   # nothing left over from a failed earlier try
     p = "#PassportWizard_addressStep_"
     advance_to(driver, p + "mailStreetTextBox", "the Address step")
     fill_text(driver, p + "mailStreetTextBox", d.get("Mail Street"))
@@ -1196,6 +1232,7 @@ def step_address(driver, d):
         click(driver, p + "addPhoneNumberButton")
         pause_between_fields()
 
+    fix_pending_state_lists(driver)
     click_next(driver)
 
 
@@ -1215,6 +1252,7 @@ def step_travel_plans(driver, d):
 
 def step_emergency_contact(driver, d):
     log("Step 3: Emergency Contact")
+    _PENDING_STATE_LISTS.clear()   # nothing left over from a failed earlier try
     p = "#PassportWizard_emergencyContacts_"
     advance_to(driver, p + "ecNameTextBox", "the Emergency Contact step")
     fill_text(driver, p + "ecNameTextBox", d.get("EC Name"))
@@ -1237,6 +1275,7 @@ def step_emergency_contact(driver, d):
     else:
         fill_text(driver, p + "ecRelationshipTextBox", relationship)
 
+    fix_pending_state_lists(driver)
     click_next(driver)
 
 
@@ -2493,7 +2532,12 @@ def run_one(data: dict) -> Path:
         if validation_errors:
             log(f"  Visible field-validation error(s) on page: {validation_errors}")
             log(f"  (original exception: {e!r})")
-            e = FieldValidationError("האתר סימן שדה שגוי/חסר: " + " | ".join(validation_errors))
+            # Keep the real cause next to it: on 2026-11-10 a leftover
+            # "Required" was all the Notes said, and the actual failure was
+            # something else on that page.
+            cause = re.sub(r"\s+", " ", str(getattr(e, "msg", None) or e)).strip()[:300]
+            e = FieldValidationError("האתר סימן שדה שגוי/חסר: " + " | ".join(validation_errors)
+                                     + (f"\n(הבוט נעצר על: {type(e).__name__}: {cause})" if cause else ""))
 
         # Attach paths to the exception so run_all() can upload them to Drive
         # too - debug/ is local to whichever computer ran this, but staff
