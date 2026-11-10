@@ -115,6 +115,8 @@ DOWNLOAD_DIR = Path(__file__).parent / "downloaded_pdfs"  # local staging only -
 CHROME_PROFILE_DIR = Path(__file__).parent / "chrome_profile"
 
 NEXT_BUTTON = "#PassportWizard_StepNavigationTemplateContainerID_StartNextPreviousButton"
+# Start page button: "Apply" before the 2026-11 redesign, "Fill forms" after.
+APPLY_BUTTON = "#PassportWizard_portalStep_ApplyButton, #PassportWizard_portalStep_ImageButton"
 # The Fees step is the wizard's last step - ASP.NET Wizard controls swap in a
 # different navigation template there, so its forward button has a different
 # id than every other step's NEXT_BUTTON.
@@ -277,7 +279,7 @@ try {
   if (window.Sys && Sys.WebForms && Sys.WebForms.PageRequestManager &&
       Sys.WebForms.PageRequestManager.getInstance().get_isInAsyncPostBack()) return false;
 } catch (e) {}
-var p = document.getElementById('updateProgress');
+var p = document.getElementById('updateProgress') || document.getElementById('ctl00_MainContent_updateProgress');
 if (p && getComputedStyle(p).display !== 'none' && p.offsetParent !== null) return false;
 return true;
 """
@@ -352,12 +354,28 @@ def _collect_visible_validation_errors(driver) -> list:
     return messages
 
 
+# The site's 2026-11 redesign moved every control under the master page, so
+# every id gained a "ctl00_MainContent_" prefix (PassportWizard_x ->
+# ctl00_MainContent_PassportWizard_x). Every selector in this file is written
+# against the old ids; css() turns each one into "old OR new" so the same code
+# runs against either version of the site.
+NEW_ID_PREFIX = "ctl00_MainContent_"
+
+
+def css(selector: str) -> str:
+    if "PassportWizard_" not in selector or NEW_ID_PREFIX in selector:
+        return selector
+    new = (selector.replace("#PassportWizard_", "#" + NEW_ID_PREFIX + "PassportWizard_")
+                   .replace('"PassportWizard_', '"' + NEW_ID_PREFIX + "PassportWizard_"))
+    return f"{selector}, {new}"
+
+
 def find(driver, selector, condition=EC.presence_of_element_located, timeout=DEFAULT_WAIT):
     """Waits for one element. A plain Selenium timeout here carries an EMPTY
     message plus a native stacktrace - the same opaque "Message:" that has
     now shown up in several real failure reports (2026-08-12, 2026-09-15) -
     so the selector it gave up on is attached to the error instead."""
-    locator = (By.CSS_SELECTOR, selector)
+    locator = (By.CSS_SELECTOR, css(selector))
     try:
         return WebDriverWait(driver, timeout).until(condition(locator))
     except UnexpectedAlertPresentException:
@@ -376,7 +394,7 @@ def _timeout_message(driver, selector: str, condition) -> str:
     the screen would have seen."""
     want = getattr(condition, "__name__", str(condition))
     try:
-        els = driver.find_elements(By.CSS_SELECTOR, selector)
+        els = driver.find_elements(By.CSS_SELECTOR, css(selector))
         if not els:
             state = "not in the page at all"
         elif not els[0].is_displayed():
@@ -398,7 +416,7 @@ def _timeout_message(driver, selector: str, condition) -> str:
 
 
 def count(driver, selector):
-    return len(driver.find_elements(By.CSS_SELECTOR, selector))
+    return len(driver.find_elements(By.CSS_SELECTOR, css(selector)))
 
 
 def is_visible(driver, selector) -> bool:
@@ -406,8 +424,18 @@ def is_visible(driver, selector) -> bool:
     just hidden via CSS until a JS handler reveals them - count() alone
     would find them and check() would then time out trying to click
     something invisible. Check actual visibility, not just DOM presence."""
-    els = driver.find_elements(By.CSS_SELECTOR, selector)
-    return bool(els) and els[0].is_displayed()
+    els = driver.find_elements(By.CSS_SELECTOR, css(selector))
+    if not els:
+        return False
+    if els[0].is_displayed():
+        return True
+    # The 2026-11 redesign (USWDS) hides every radio/checkbox <input> and
+    # shows only its <label for=id> - the question is on screen if the label is.
+    if (els[0].get_attribute("type") or "").lower() in ("radio", "checkbox"):
+        el_id = els[0].get_attribute("id")
+        return el_id is not None and any(
+            lb.is_displayed() for lb in driver.find_elements(By.CSS_SELECTOR, f'label[for="{el_id}"]'))
+    return False
 
 
 def wait_visible(driver, selector, timeout=DEFAULT_WAIT) -> bool:
@@ -423,9 +451,10 @@ def wait_visible(driver, selector, timeout=DEFAULT_WAIT) -> bool:
     put a child's limited-validity run on the wrong (DS-11) track and broke
     its Fees page. Timing-dependent, so it looked random."""
     try:
-        WebDriverWait(driver, timeout).until(
-            EC.visibility_of_element_located((By.CSS_SELECTOR, selector))
-        )
+        # is_visible, not EC.visibility_of_element_located: since the
+        # redesign a radio/checkbox <input> is never displayed, only its label.
+        WebDriverWait(driver, timeout, ignored_exceptions=(StaleElementReferenceException,)).until(
+            lambda d: is_visible(d, selector))
         return True
     except SeleniumTimeout:
         return False
@@ -443,14 +472,15 @@ def unanswered_visible_radio_groups(driver, radio_selector: str) -> list:
     script = """
     const groups = {};
     document.querySelectorAll(arguments[0]).forEach(el => {
-      if (!el.offsetParent) return;           // not visible
+      const label = el.id && document.querySelector('label[for="' + el.id + '"]');
+      if (!el.offsetParent && !(label && label.offsetParent)) return;  // not visible (USWDS shows only the label)
       if (!(el.name in groups)) groups[el.name] = false;
       if (el.checked) groups[el.name] = true;
     });
     return Object.keys(groups).filter(n => !groups[n]);
     """
     try:
-        return driver.execute_script(script, radio_selector) or []
+        return driver.execute_script(script, css(radio_selector)) or []
     except Exception:
         return []
 
@@ -493,7 +523,8 @@ def _postback_evidence(driver) -> str:
     bits = []
     try:
         value = driver.execute_script(
-            "var e = document.getElementById('submittedData'); return e ? e.value : '(no such field)';")
+            "var e = document.getElementById('submittedData') || document.getElementById('ctl00_MainContent_submittedData'); "
+            "return e ? e.value : '(no such field)';")
         bits.append(f"submittedData={value!r}")
     except Exception as e:
         bits.append(f"submittedData unreadable ({type(e).__name__})")
@@ -817,6 +848,14 @@ def _retry_on_stale(action, retries=2):
             time.sleep(0.5)
 
 
+def _comparable(text) -> str:
+    """The redesigned site masks some inputs as you type (an SSN becomes
+    000-00-0000) and drops commas from place names ("HAIFA, ISRAEL" stays
+    "HAIFA ISRAEL" whatever is typed), so compare without that punctuation
+    and case - a retype would only get the same result again."""
+    return re.sub(r"[\s\-(),]", "", str(text)).upper()
+
+
 def fill_text(driver, selector, value):
     if value is None or str(value).strip() == "":
         return
@@ -838,7 +877,7 @@ def fill_text(driver, selector, value):
         # own onkeypress handlers uppercase the stored value, not just the
         # CSS text-transform display.
         actual = (el.get_attribute("value") or "").strip()
-        if actual.upper() != str(expected).strip().upper():
+        if _comparable(actual) != _comparable(expected):
             log(f"  {selector}: got {actual!r} after typing, expected {expected!r} - retyping once")
             el.clear()
             _type_text(driver, el, expected)
@@ -851,6 +890,9 @@ def select_option(driver, selector, value):
     if value is None or str(value).strip() == "":
         return
     el = find(driver, selector)
+    if el.tag_name.lower() == "input" and (el.get_attribute("role") or "") == "combobox":
+        _select_combo_box(driver, el, selector, value)
+        return
     sel = Select(el)
     target = str(value).strip().lower()
     for option in sel.options:
@@ -881,13 +923,121 @@ def select_option(driver, selector, value):
     )
 
 
+def _matching_option(options, value):
+    """(value, text) of the <option> matching value - by visible text, by
+    value code, or by the part after "XX - " - else None."""
+    target = str(value).strip().lower()
+    for val, text in options:
+        if target in (text.strip().lower(), val.strip().lower()):
+            return val, text
+    for val, text in options:
+        t = text.strip().lower()
+        if " - " in t and target == t.split(" - ", 1)[1].strip():
+            return val, text
+    return None
+
+
+def _clear_combo_box(driver, el):
+    """el.clear() does not empty a combo box that already holds a choice
+    (the widget puts the old text back) - typing then appends to it and the
+    list finds nothing. Use the box's own clear button, then the keyboard."""
+    from selenium.webdriver.common.keys import Keys
+    if not (el.get_attribute("value") or ""):
+        return
+    try:
+        box = el.find_element(By.XPATH, "./ancestor::div[contains(@class,'usa-combo-box')][1]")
+        btn = box.find_element(By.CSS_SELECTOR, ".usa-combo-box__clear-input")
+        if btn.is_displayed():
+            btn.click()
+    except Exception:
+        pass
+    if el.get_attribute("value"):
+        el.click()
+        el.send_keys(Keys.CONTROL, "a")
+        el.send_keys(Keys.BACKSPACE)
+
+
+def _select_combo_box(driver, input_el, selector, value):
+    """Country fields since the 2026-11 redesign: a USWDS combo box - a text
+    box where you type and pick from the list that opens, backed by a hidden
+    <select> (which lost its id - the id now sits on the text box). The real
+    <select> is the one the server reads, and picking from the list is what
+    fires the page's change handler that loads the State list."""
+    box = input_el.find_element(By.XPATH, "./ancestor::div[contains(@class,'usa-combo-box')][1]")
+    hidden = box.find_element(By.CSS_SELECTOR, "select")
+    options = [(o.get_attribute("value") or "", o.get_attribute("textContent") or "")
+               for o in hidden.find_elements(By.TAG_NAME, "option")]
+    match = _matching_option(options, value)
+    if not match:
+        raise NoSuchElementException(
+            f"No option matching {value!r} in the {selector} list - the sheet's "
+            f"spelling may not match the site's list exactly.")
+    code, label = match
+    label = label.strip()
+
+    def _do():
+        el = find(driver, selector)
+        _clear_combo_box(driver, el)
+        # Type only the start, like a person - the list filters as you type.
+        _type_text(driver, el, label[:min(len(label), 6)])
+        list_id = el.get_attribute("aria-controls") or (el.get_attribute("id") + "--list")
+        item = WebDriverWait(driver, DEFAULT_WAIT).until(
+            lambda d: next((li for li in d.find_elements(By.CSS_SELECTOR, f"[id='{list_id}'] li")
+                            if li.is_displayed() and (
+                                (li.get_attribute("data-value") or "") == code
+                                or li.text.strip().lower() == label.lower())), None))
+        item.click()
+
+    _retry_on_stale(_do)
+    time.sleep(1.0)  # the page's change handler is debounced
+    wait_until_settled(driver)
+    box = find(driver, selector).find_element(By.XPATH, "./ancestor::div[contains(@class,'usa-combo-box')][1]")
+    chosen = box.find_element(By.CSS_SELECTOR, "select").get_attribute("value")
+    if chosen != code:
+        raise NoSuchElementException(
+            f"Picked {label!r} in {selector} but the form holds {chosen!r} - the list did not take it.")
+    pause_between_fields()
+
+
+def _click_choice(driver, el, selector):
+    """Clicks a radio/checkbox the way a person would. Since the 2026-11
+    USWDS redesign the input itself is visually hidden and its <label> is what
+    is on screen, so: the input if it is clickable, else its label, else a
+    script click as the last resort."""
+    deadline = time.time() + DEFAULT_WAIT
+    while time.time() < deadline:
+        try:
+            if el.is_displayed() and el.is_enabled():
+                el.click()
+                return
+        except ElementClickInterceptedException:
+            pass
+        el_id = el.get_attribute("id")
+        labels = driver.find_elements(By.CSS_SELECTOR, f'label[for="{el_id}"]') if el_id else []
+        for label in labels:
+            try:
+                if label.is_displayed():
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", label)
+                    label.click()
+                    if el.is_selected():
+                        return
+            except ElementClickInterceptedException:
+                pass
+        if el.is_enabled() and labels:
+            driver.execute_script("arguments[0].click();", el)
+            return
+        time.sleep(0.5)
+    raise SeleniumTimeout(f"Timed out waiting for {selector} (or its label) to be clickable.")
+
+
 def check(driver, selector):
     """Ensures a checkbox/radio ends up checked - mirrors Playwright's .check(),
     which is a no-op if it's already checked."""
     def _do():
-        el = find(driver, selector, EC.element_to_be_clickable)
-        if not el.is_selected():
-            el.click()
+        el = find(driver, selector)
+        if el.is_selected():
+            return
+        _click_choice(driver, el, selector)
 
     _retry_on_stale(_do)
     wait_until_settled(driver)
@@ -987,7 +1137,12 @@ def step_address(driver, d):
     phone = digits_only(d.get("Phone"))
     if phone:
         fill_text(driver, p + "addPhoneNumberTextBox", phone)
-        check(driver, p + "PhoneNumberType_2")  # Cell
+        # The 2026-11 redesign turned the type radios into a <select>
+        # (Home/Work/Cell); older pages still have PhoneNumberType_2.
+        if count(driver, p + "PhoneNumberType_2"):
+            check(driver, p + "PhoneNumberType_2")  # Cell
+        else:
+            select_option(driver, p + "PhoneNumberType", "Cell")
         click(driver, p + "addPhoneNumberButton")
         pause_between_fields()
 
@@ -1026,9 +1181,49 @@ def step_emergency_contact(driver, d):
     fill_text(driver, p + "ZipCodeTextBox", ec_zip)
     fill_text(driver, p + "ecPhoneTextBox", digits_only(d.get("EC Phone")))
     fill_text(driver, p + "ecEmailTextBox", d.get("EC Email"))
-    fill_text(driver, p + "ecRelationshipTextBox", d.get("EC Relationship"))
+    relationship = d.get("EC Relationship")
+    if count(driver, p + "ecRelationshipList"):
+        # 2026-11 redesign: free text became a fixed dropdown.
+        select_option(driver, p + "ecRelationshipList", ec_relationship_choice(relationship))
+    else:
+        fill_text(driver, p + "ecRelationshipTextBox", relationship)
 
     click_next(driver)
+
+
+_EC_RELATIONSHIP_WORDS = {
+    "Parent": ("parent", "mother", "father", "mom", "dad", "mum", "stepmother",
+               "stepfather", "אמא", "אבא", "אם", "אב", "הורה"),
+    "Sibling": ("sibling", "brother", "sister", "אח", "אחות"),
+    "Cousin": ("cousin", "בן דוד", "בת דודה", "בן דודה", "בת דוד"),
+    "Grandparent": ("grandparent", "grandmother", "grandfather", "grandma",
+                    "grandpa", "סבא", "סבתא"),
+    "Friend": ("friend", "חבר", "חברה"),
+    "Relative": ("relative", "spouse", "husband", "wife", "son", "daughter",
+                 "uncle", "aunt", "niece", "nephew", "in-law", "in law",
+                 "בעל", "אישה", "אשה", "בן", "בת", "דוד", "דודה", "גיס", "גיסה",
+                 "חותן", "חותנת", "חמות", "חם", "קרוב", "קרובה"),
+}
+
+
+def ec_relationship_choice(value) -> str:
+    """Maps the sheet's free-text relationship onto the site's dropdown
+    (Parent/Sibling/Cousin/Grandparent/Friend/Relative/Other)."""
+    text = str(value or "").strip().lower()
+    if not text:
+        return "Other"
+    # Whole value first (so "בן דוד" isn't caught by "בן"), then any word.
+    for choice, words in _EC_RELATIONSHIP_WORDS.items():
+        if text in words:
+            return choice
+    for choice in ("Grandparent", "Cousin", "Parent", "Sibling", "Friend", "Relative"):
+        if any(w in text for w in _EC_RELATIONSHIP_WORDS[choice] if " " in w or "-" in w):
+            return choice
+    tokens = set(re.split(r"[\s/,()\-]+", text))
+    for choice in ("Grandparent", "Cousin", "Parent", "Sibling", "Friend", "Relative"):
+        if tokens & set(_EC_RELATIONSHIP_WORDS[choice]):
+            return choice
+    return "Other"
 
 
 BOOK_POSSESSION_IDS = {
@@ -1140,8 +1335,10 @@ def step_most_recent_passport_continued_if_present(driver, d):
     # unanswered and without Next, and the run sat here until a person
     # clicked Next by hand - with the name-change answers never given.
     _settle_on_step_6_or_later(driver)
-    has_data_incorrect_q = count(driver, "#PassportWizard_mostRecentPassportContinued_DataIncorrectButtonsPanel") > 0
-    has_name_changed_q = count(driver, "#PassportWizard_mostRecentPassportContinued_NameChangedButtonsPanel") > 0
+    # The 2026-11 redesign dropped the two *ButtonsPanel wrappers; the radios
+    # themselves exist on both versions, so look for those.
+    has_data_incorrect_q = any(count(driver, m) > 0 for m in STEP_6_PANELS[0::2])
+    has_name_changed_q = any(count(driver, m) > 0 for m in STEP_6_PANELS[1::2])
     if not has_data_incorrect_q and not has_name_changed_q:
         log("Step 6 (Most Recent Passport Continued) did not appear - skipping, as expected for first-time applicants")
         return
@@ -1259,7 +1456,7 @@ def _fill_parent(driver, d, n: int):
 LATER_STEP_MARKERS = (
     "#PassportWizard_moreAboutYouStep_unknownParent1CheckBox",   # parents & spouse (DS-11)
     "#PassportWizard_otherNameStep_addOtherFirstTextBox",        # other names
-    "#PassportWizard_reviewStep_Label2",                         # review
+    "#PassportWizard_reviewStep_Label2, #PassportWizard_reviewStep_GotoPersonalDetails",                         # review
     "#PassportWizard_lostStolenStep_reporterYesRadioButton",     # lost / stolen report
 )   # plus the Fees page, added at call time (FEE_PAGE_MARKERS is defined below)
 
@@ -1284,8 +1481,11 @@ def _settle_on_a_later_step(driver):
     return False
 
 
+# Even positions: the "data printed correctly?" question; odd: "name changed?".
 STEP_6_PANELS = ("#PassportWizard_mostRecentPassportContinued_DataIncorrectButtonsPanel",
-                 "#PassportWizard_mostRecentPassportContinued_NameChangedButtonsPanel")
+                 "#PassportWizard_mostRecentPassportContinued_NameChangedButtonsPanel",
+                 "#PassportWizard_mostRecentPassportContinued_dataIncorrectNone",
+                 "#PassportWizard_mostRecentPassportContinued_nameChangeNone")
 
 
 def _settle_on_step_6_or_later(driver):
@@ -1415,7 +1615,7 @@ def add_other_name(driver, first, last, attempts=2):
             return
         fill_text(driver, p + "addOtherFirstTextBox", first)
         fill_text(driver, p + "addOtherLastTextBox", last)
-        click(driver, p + "addButton")
+        click(driver, p + "addButton, " + p + "addOtherNameButton")  # renamed in the 2026-11 redesign
         wait_until_settled(driver)
         pause_between_fields()
         if _name_listed(driver, first, last):
@@ -1430,7 +1630,7 @@ def step_review(driver, d):
     # late Parent & Spouse Info trigger (e.g. from the Lost/Stolen report) -
     # see step_other_names() for the same pattern.
     _settle_on_a_later_step(driver)
-    if count(driver, "#PassportWizard_reviewStep_Label2") == 0:
+    if count(driver, "#PassportWizard_reviewStep_Label2, #PassportWizard_reviewStep_GotoPersonalDetails") == 0:
         return
     log("Step 8: Review")
     click_next(driver)
@@ -1579,8 +1779,16 @@ def step_fees(driver, d):
     _log_fees_page(driver)
     check_first_present(driver, [p + "bookFee"], "passport book")
     # bookType52 (Large Book) intentionally left unchecked - business rule
-    check_first_present(driver, [p + "routineService", p + "bookRoutineService"], "routine service")
-    check_first_present(driver, [p + "bookPriorityMail", p + "priorityMail"], "standard delivery")
+    # The 2026-11 redesign dropped the service and delivery choices from this
+    # page (only Book/Card/Both remain). Choosing the book posts back, so
+    # wait, then answer them only where the page still has them.
+    wait_until_settled(driver)
+    for options, label in (([p + "routineService", p + "bookRoutineService"], "routine service"),
+                           ([p + "bookPriorityMail", p + "priorityMail"], "standard delivery")):
+        if any(is_visible(driver, o) for o in options):
+            check_first_present(driver, options, label)
+        else:
+            log(f"  Fees page has no {label} choice (new site layout) - nothing to pick")
 
     click_finish(driver)
 
@@ -1609,7 +1817,9 @@ def step_lost_stolen_report_if_present(driver, d):
     Lost or Stolen?" was answered No - the site walks the applicant through
     filing/documenting the loss right there instead of assuming it was
     already reported to police."""
-    if count(driver, "#PassportWizard_lostStolenStep_reporterPanel") == 0:
+    # reporterPanel is gone since the 2026-11 redesign; the radios are on both.
+    if (count(driver, "#PassportWizard_lostStolenStep_reporterPanel") == 0
+            and count(driver, "#PassportWizard_lostStolenStep_reporterYesRadioButton") == 0):
         log("Lost/Stolen Report step did not appear - skipping")
         return
 
@@ -2101,7 +2311,7 @@ PAGE_MARKERS = {
     "most_recent_passport": "#PassportWizard_mostRecentPassport_CurrentHaveNone",
     "parent_spouse": "#PassportWizard_moreAboutYouStep_unknownParent1CheckBox",
     "other_names": "#PassportWizard_otherNameStep_addOtherFirstTextBox",
-    "review": "#PassportWizard_reviewStep_Label2",
+    "review": "#PassportWizard_reviewStep_Label2, #PassportWizard_reviewStep_GotoPersonalDetails",
     "lost_stolen": "#PassportWizard_lostStolenStep_reporterYesRadioButton",
 }
 
@@ -2130,7 +2340,7 @@ def run_one(data: dict) -> Path:
             time.sleep(5)
         check_for_block(driver, context="initial page load")
 
-        click(driver, "#PassportWizard_portalStep_ApplyButton")
+        click(driver, APPLY_BUTTON)
         time.sleep(4)
         log(f"URL after 1st Apply click: {driver.current_url}")
         check_for_block(driver, context="after 1st Apply click")
@@ -2140,7 +2350,7 @@ def run_one(data: dict) -> Path:
         # when Cloudflare was 403-blocking the first postback - kept as a
         # fallback only, in case that resurfaces.
         if count(driver, "#PassportWizard_aboutYouStep_firstNameTextBox") == 0:
-            click(driver, "#PassportWizard_portalStep_ApplyButton")
+            click(driver, APPLY_BUTTON)
             pause_between_steps()
             log(f"URL after 2nd Apply click: {driver.current_url}, title: {driver.title}")
             check_for_block(driver, context="after 2nd Apply click")

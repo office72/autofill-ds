@@ -367,6 +367,12 @@ document-analyzer** (`C:\Users\office_americandocs\document-analyzer`) -
 `build_google_sheet_template.py` כדי שהתבנית החיה תתעדכן (עותקים קיימים
 לא יושפעו רטרואקטיבית, כרגיל).
 
+## עיצוב חדש של האתר (2026-11-10)
+
+האתר עבר ל-USWDS. הבוט עודכן ואומת חי בכל העמודים — פירוט ב-`notes.md`. העיקר:
+רדיו/תיבות סימון מוסתרים ורק התווית גלויה (`_click_choice`, `is_visible`), קידומת
+`ctl00_MainContent_` לכל id, מדינות ב-combo box.
+
 ## הערה על git
 
 הריפו הזה אותחל תחת git ב-2026-08-11 (מקומי בלבד באותו שלב). **מ-2026-09
