@@ -1044,6 +1044,58 @@ def check(driver, selector):
     pause_between_fields()
 
 
+def _state_list_matches(driver, state_selector, usa: bool) -> bool:
+    """A US country needs an enabled state list with real options; any other
+    country leaves it disabled ("State Not Required")."""
+    els = driver.find_elements(By.CSS_SELECTOR, css(state_selector))
+    if not els:
+        return True
+    try:
+        el = els[0]
+        enabled = el.is_enabled() and len(el.find_elements(By.TAG_NAME, "option")) > 1
+    except StaleElementReferenceException:
+        return False
+    return enabled if usa else not enabled
+
+
+def select_country(driver, country_selector, state_selector, process_selector,
+                   country, state=None):
+    """Picks a country and, for the US, the state.
+
+    Since the 2026-11 redesign the state list next to each country does not
+    always follow the country by itself: with ISRAEL picked it can stay
+    "required" until the small "Process" button beside it is pressed (seen
+    by hand on About the Applicant). Press it only when the list is wrong
+    for the country, so pages that already update by themselves are left
+    alone."""
+    select_option(driver, country_selector, country)
+    if not country or not str(country).strip():
+        return
+    usa = country_is_usa(country)
+    wait_until_settled(driver)
+    for attempt in (1, 2):
+        if _state_list_matches(driver, state_selector, usa):
+            break
+        buttons = driver.find_elements(By.CSS_SELECTOR, css(process_selector))
+        if not buttons:
+            break
+        log(f"  state list did not follow the country ({country}) - pressing Process ({attempt}/2)")
+        if attempt == 1:
+            driver.execute_script("arguments[0].click();", buttons[0])
+        else:
+            # The button validates the whole page first, so a still-empty
+            # field further down (SSN, phone...) cancels the click. Post back
+            # for the button directly, the way its own onclick ends up doing.
+            driver.execute_script("__doPostBack(arguments[0].name, '');", buttons[0])
+        time.sleep(1)
+        wait_until_settled(driver)
+        pause_between_fields()
+    else:
+        log(f"  state list still does not match {country} after Process - carrying on")
+    if usa:
+        select_option(driver, state_selector, state)
+
+
 def step_about_you(driver, d):
     log("Step 1: About You")
     p = "#PassportWizard_aboutYouStep_"
@@ -1055,10 +1107,8 @@ def step_about_you(driver, d):
     fill_text(driver, p + "pobCityTextBox", d.get("City of Birth"))
 
     country = d.get("Country of Birth")
-    select_option(driver, p + "pobCountryList", country)
-    if country_is_usa(country):
-        state = d.get("State of Birth (USA only)")
-        select_option(driver, p + "pobStateList", state)
+    select_country(driver, p + "pobCountryList", p + "pobStateList", p + "btnUpdateState",
+                   country, d.get("State of Birth (USA only)"))
 
     ssn = d.get("SSN") or "000000000"
     fill_text(driver, p + "ssnTextBox", ssn)
@@ -1083,9 +1133,9 @@ def step_address(driver, d):
     fill_text(driver, p + "mailStreetTextBox", d.get("Mail Street"))
     fill_text(driver, p + "mailCityTextBox", d.get("Mail City"))
     mail_country = d.get("Mail Country")
-    select_option(driver, p + "mailCountryList", mail_country)
+    select_country(driver, p + "mailCountryList", p + "mailStateList", p + "btnUpdateMailState",
+                   mail_country, d.get("Mail State (USA only)"))
     if country_is_usa(mail_country):
-        select_option(driver, p + "mailStateList", d.get("Mail State (USA only)"))
         mail_zip = d.get("Mail Zip")
     else:
         # The field itself only accepts xxxxx/xxxxx-xxxx (US format), but it
@@ -1109,9 +1159,9 @@ def step_address(driver, d):
         fill_text(driver, p + "permanentApartmentTextBox", d.get("Permanent Apartment"))
         fill_text(driver, p + "permanentCityTextBox", d.get("Permanent City"))
         perm_country = d.get("Permanent Country")
-        select_option(driver, p + "permanentCountryList", perm_country)
+        select_country(driver, p + "permanentCountryList", p + "permanentStateList",
+                       p + "btnUpdatePermState", perm_country, d.get("Permanent State (USA only)"))
         if country_is_usa(perm_country):
-            select_option(driver, p + "permanentStateList", d.get("Permanent State (USA only)"))
             perm_zip = d.get("Permanent Zip")
         else:
             perm_zip = us_zip_prefix(d.get("Permanent Zip"))  # see mailZipTextBox note above
@@ -1172,11 +1222,10 @@ def step_emergency_contact(driver, d):
     fill_text(driver, p + "ecApartmentTextBox", d.get("EC Apartment"))
     fill_text(driver, p + "ecCityTextBox", d.get("EC City"))
     ec_country = d.get("EC Country")
-    select_option(driver, p + "ecCountryList", ec_country)
+    select_country(driver, p + "ecCountryList", p + "ecStateList", p + "btnUpdateState",
+                   ec_country, d.get("EC State (USA only)"))
     ec_zip = d.get("EC Zip")
-    if country_is_usa(ec_country):
-        select_option(driver, p + "ecStateList", d.get("EC State (USA only)"))
-    else:
+    if not country_is_usa(ec_country):
         ec_zip = us_zip_prefix(ec_zip)  # required field, US-format only - see us_zip_prefix()
     fill_text(driver, p + "ZipCodeTextBox", ec_zip)
     fill_text(driver, p + "ecPhoneTextBox", digits_only(d.get("EC Phone")))
