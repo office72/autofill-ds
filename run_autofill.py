@@ -800,6 +800,28 @@ def digits_only(value):
     return digits or None
 
 
+
+def fill_phone(driver, selector, digits):
+    """Types a phone number and makes sure it ends up as xxx-xxx-xxxx.
+
+    Live experiment, 2026-11-10 (a real client's EC page kept failing with
+    "Required" next to a filled phone): the server accepts ONLY the dashed
+    form. The page adds the dashes itself as you type (oninput) - but only
+    while the browser window has focus; typed into an unfocused window the
+    digits stay bare ("0507818059") and the server rejects them, page after
+    page. "050-781-8059" set directly was accepted; "+972..." was cut to
+    "972-507-8180" (a wrong number) - never send the country code."""
+    if not digits:
+        return
+    fill_text(driver, selector, digits)
+    if len(digits) != 10:
+        return
+    dashed = f"{digits[:3]}-{digits[3:6]}-{digits[6:]}"
+    el = find(driver, selector)
+    if (el.get_attribute("value") or "").strip() != dashed:
+        log(f"  {selector}: the page did not format the phone - setting {dashed!r} directly")
+        driver.execute_script("arguments[0].value = arguments[1];", el, dashed)
+
 def us_zip_prefix(value):
     """The site's Zip Code fields only accept xxxxx or xxxxx-xxxx (US format).
     For a required US-format field tied to a non-US address (e.g. a 7-digit
@@ -1222,7 +1244,7 @@ def step_address(driver, d):
     # the Add button clicked, or the number is never actually registered.
     phone = digits_only(d.get("Phone"))
     if phone:
-        fill_text(driver, p + "addPhoneNumberTextBox", phone)
+        fill_phone(driver, p + "addPhoneNumberTextBox", phone)
         # The 2026-11 redesign turned the type radios into a <select>
         # (Home/Work/Cell); older pages still have PhoneNumberType_2.
         if count(driver, p + "PhoneNumberType_2"):
@@ -1266,7 +1288,7 @@ def step_emergency_contact(driver, d):
     if not country_is_usa(ec_country):
         ec_zip = us_zip_prefix(ec_zip)  # required field, US-format only - see us_zip_prefix()
     fill_text(driver, p + "ZipCodeTextBox", ec_zip)
-    fill_text(driver, p + "ecPhoneTextBox", digits_only(d.get("EC Phone")))
+    fill_phone(driver, p + "ecPhoneTextBox", digits_only(d.get("EC Phone")))
     fill_text(driver, p + "ecEmailTextBox", d.get("EC Email"))
     relationship = d.get("EC Relationship")
     if count(driver, p + "ecRelationshipList"):
@@ -2153,6 +2175,17 @@ def _detect_chrome_major_version():
     return None
 
 
+def _keep_page_focused(driver):
+    """Makes the page behave as focused even while staff work in another
+    window. Without it, typed text can be lost or skip the page's own
+    as-you-type formatting - seen live 2026-11-10: whole pages typed blank,
+    and a phone left without its dashes that the server then refused."""
+    try:
+        driver.execute_cdp_cmd("Emulation.setFocusEmulationEnabled", {"enabled": True})
+    except Exception as e:
+        log(f"Focus emulation not available ({type(e).__name__}) - carrying on")
+
+
 def build_driver():
     # headed on purpose - see module docstring; do NOT add --headless.
     # Plain Selenium/ChromeDriver gets 403-blocked by Cloudflare specifically
@@ -2194,7 +2227,9 @@ def build_driver():
     # a successful-but-ignored one look identical from Python, and we spent
     # two days reasoning about which of them it was.
     options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
-    return uc.Chrome(options=options, version_main=_detect_chrome_major_version())
+    driver = uc.Chrome(options=options, version_main=_detect_chrome_major_version())
+    _keep_page_focused(driver)
+    return driver
 
 
 def _build_driver_with_retry(attempts: int = 3, delay_seconds: int = 10):
