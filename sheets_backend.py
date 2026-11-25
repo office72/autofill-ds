@@ -268,8 +268,11 @@ def get_parent_folder_id(spreadsheet_id: str) -> str:
 
 
 def _find_or_create_subfolder(drive, parent_folder_id: str, name: str) -> str:
+    # Names come from the applicant (e.g. NETA'A) - an unescaped quote breaks
+    # the Drive query with a 400 and the PDF never gets uploaded.
+    quoted = name.replace("\\", "\\\\").replace("'", "\\'")
     existing = drive.files().list(
-        q=f"'{parent_folder_id}' in parents and name='{name}' and trashed=false "
+        q=f"'{parent_folder_id}' in parents and name='{quoted}' and trashed=false "
           f"and mimeType='application/vnd.google-apps.folder'",
         fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True,
     ).execute().get("files", [])
